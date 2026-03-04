@@ -1,4 +1,8 @@
-use crate::ast::{Attrs, Document, Node, NodeKind, RawBlockCompiler};
+use crate::ast::{Attrs, Document, Node, NodeKind, Value};
+
+use syntect::highlighting::ThemeSet;
+use syntect::html::highlighted_html_for_string;
+use syntect::parsing::SyntaxSet;
 
 // ── Tag builder ──
 
@@ -55,9 +59,9 @@ impl<'a> Tag<'a> {
         close_tag(self.name, out);
     }
 
-    fn wrap(&self, node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut String) {
+    fn wrap(&self, node: &Node, out: &mut String) {
         self.open(out);
-        render_children(node, compiler, out);
+        render_children(node, out);
         close_tag(self.name, out);
     }
 }
@@ -71,9 +75,13 @@ fn close_tag(name: &str, out: &mut String) {
 // ── Renderer ──
 
 /// Render a Document AST to an HTML string.
-pub fn render_html(doc: &Document, compiler: Option<&dyn RawBlockCompiler>) -> String {
+///
+/// Raw blocks and preview blocks should be pre-compiled via the `CompileBlocks`
+/// pass before calling this function. Without pre-compilation, raw blocks fall
+/// back to escaped `<pre>` output.
+pub fn render_html(doc: &Document) -> String {
     let mut out = String::new();
-    render_node(&doc.content, compiler, &mut out);
+    render_node(&doc.content, &mut out);
     out
 }
 
@@ -86,9 +94,9 @@ fn wrap_tag_name(kind: &NodeKind) -> Option<&'static str> {
     }
 }
 
-fn render_node(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut String) {
+fn render_node(node: &Node, out: &mut String) {
     if let Some(name) = wrap_tag_name(&node.kind) {
-        Tag::new(name).ast_attrs(&node.attrs).wrap(node, compiler, out);
+        Tag::new(name).ast_attrs(&node.attrs).wrap(node, out);
         return;
     }
     match &node.kind {
@@ -96,7 +104,7 @@ fn render_node(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut S
             if *level > 0 {
                 Tag::new("section").ast_attrs(&node.attrs).open(out);
             }
-            render_children(node, compiler, out);
+            render_children(node, out);
             if *level > 0 {
                 close_tag("section", out);
             }
@@ -104,33 +112,43 @@ fn render_node(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut S
         NodeKind::Heading { level } => {
             let tag = format!("h{}", level.min(&6));
             Tag::new(&tag).ast_attrs(&node.attrs).open(out);
-            render_children(node, compiler, out);
+            render_children(node, out);
             close_tag(&tag, out);
         }
         NodeKind::BlockQuote => {
             Tag::new("blockquote")
                 .ast_attrs(&node.attrs)
-                .wrap(node, compiler, out);
+                .wrap(node, out);
         }
-        NodeKind::List { ordered, start } => render_list(node, *ordered, *start, compiler, out),
-        NodeKind::Table => render_table(node, compiler, out),
-        NodeKind::TableRow => Tag::new("tr").wrap(node, compiler, out),
-        NodeKind::TableCell => Tag::new("td").wrap(node, compiler, out),
+        NodeKind::List { ordered, start } => render_list(node, *ordered, *start, out),
+        NodeKind::Table => render_table(node, out),
+        NodeKind::TableRow => Tag::new("tr").wrap(node, out),
+        NodeKind::TableCell => Tag::new("td").wrap(node, out),
         NodeKind::ThematicBreak => out.push_str("<hr>"),
-        NodeKind::Caption => Tag::new("figcaption").wrap(node, compiler, out),
-        NodeKind::CodeBlock { lang, source } => render_code_block(lang, source, &node.attrs, out),
+        NodeKind::Caption => Tag::new("figcaption").wrap(node, out),
+        NodeKind::CodeBlock { lang, source } => {
+            if node.attrs.properties.contains_key("preview") {
+                render_preview_block(lang, source, &node.attrs, out);
+            } else {
+                render_code_block(lang, source, &node.attrs, out);
+            }
+        }
         NodeKind::RawBlock { format, source } => {
-            render_raw_block(format, source, &node.attrs, compiler, out);
+            if node.attrs.properties.contains_key("preview") {
+                render_preview_block(format, source, &node.attrs, out);
+            } else {
+                render_raw_block(format, source, &node.attrs, out);
+            }
         }
         NodeKind::Math { display, source } => render_math(*display, source, &node.attrs, out),
         NodeKind::Text(s) => out.push_str(&escape_html(s)),
         NodeKind::Code(s) => Tag::new("code").wrap_text(s, out),
-        NodeKind::Emphasis => Tag::new("em").wrap(node, compiler, out),
-        NodeKind::Strong => Tag::new("strong").wrap(node, compiler, out),
-        NodeKind::Strikethrough => Tag::new("del").wrap(node, compiler, out),
+        NodeKind::Emphasis => Tag::new("em").wrap(node, out),
+        NodeKind::Strong => Tag::new("strong").wrap(node, out),
+        NodeKind::Strikethrough => Tag::new("del").wrap(node, out),
         NodeKind::Link { url } => {
             Tag::new("a").attr("href", url).open(out);
-            render_children(node, compiler, out);
+            render_children(node, out);
             close_tag("a", out);
         }
         NodeKind::Image { url, alt } => {
@@ -155,28 +173,21 @@ fn render_node(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut S
         NodeKind::SoftBreak => out.push('\n'),
         NodeKind::HardBreak => out.push_str("<br>"),
         NodeKind::FileScope { .. } | NodeKind::Custom { .. } => {
-            render_children(node, compiler, out);
+            render_children(node, out);
         }
-        NodeKind::Space { .. }
-        | NodeKind::Paragraph
-        | NodeKind::ListItem
-        | NodeKind::Figure => unreachable!("handled by wrap_tag_name"),
+        NodeKind::Space { .. } | NodeKind::Paragraph | NodeKind::ListItem | NodeKind::Figure => {
+            unreachable!("handled by wrap_tag_name")
+        }
     }
 }
 
-fn render_children(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut String) {
+fn render_children(node: &Node, out: &mut String) {
     for child in &node.children {
-        render_node(child, compiler, out);
+        render_node(child, out);
     }
 }
 
-fn render_list(
-    node: &Node,
-    ordered: bool,
-    start: Option<u64>,
-    compiler: Option<&dyn RawBlockCompiler>,
-    out: &mut String,
-) {
+fn render_list(node: &Node, ordered: bool, start: Option<u64>, out: &mut String) {
     let mut tag = Tag::new(if ordered { "ol" } else { "ul" });
     tag = tag.ast_attrs(&node.attrs);
     if let Some(s) = start
@@ -184,15 +195,15 @@ fn render_list(
     {
         tag = tag.attr("start", &s.to_string());
     }
-    tag.wrap(node, compiler, out);
+    tag.wrap(node, out);
 }
 
-fn render_table(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut String) {
+fn render_table(node: &Node, out: &mut String) {
     Tag::new("table").ast_attrs(&node.attrs).open(out);
     let mut rows = node.children.iter();
     if let Some(header_row) = rows.next() {
         out.push_str("<thead><tr>");
-        render_table_cells(header_row, "th", compiler, out);
+        render_table_cells(header_row, "th", out);
         out.push_str("</tr></thead>");
     }
     let body_rows: Vec<_> = rows.collect();
@@ -200,7 +211,7 @@ fn render_table(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut 
         out.push_str("<tbody>");
         for row in body_rows {
             out.push_str("<tr>");
-            render_table_cells(row, "td", compiler, out);
+            render_table_cells(row, "td", out);
             out.push_str("</tr>");
         }
         out.push_str("</tbody>");
@@ -208,20 +219,25 @@ fn render_table(node: &Node, compiler: Option<&dyn RawBlockCompiler>, out: &mut 
     close_tag("table", out);
 }
 
-fn render_table_cells(
-    row: &Node,
-    tag: &str,
-    compiler: Option<&dyn RawBlockCompiler>,
-    out: &mut String,
-) {
+fn render_table_cells(row: &Node, tag: &str, out: &mut String) {
     for cell in &row.children {
         Tag::new(tag).open(out);
-        render_children(cell, compiler, out);
+        render_children(cell, out);
         close_tag(tag, out);
     }
 }
 
 fn render_code_block(lang: &str, source: &str, attrs: &Attrs, out: &mut String) {
+    if !lang.is_empty()
+        && let Some(highlighted) = highlight_code(lang, source)
+    {
+        Tag::new("pre").ast_attrs(attrs).open(out);
+        let code = Tag::new("code").class(&format!("language-{lang}"));
+        code.open(out);
+        out.push_str(&highlighted);
+        out.push_str("</code></pre>");
+        return;
+    }
     Tag::new("pre").ast_attrs(attrs).open(out);
     let mut code = Tag::new("code");
     if !lang.is_empty() {
@@ -232,24 +248,124 @@ fn render_code_block(lang: &str, source: &str, attrs: &Attrs, out: &mut String) 
     out.push_str("</code></pre>");
 }
 
-fn render_raw_block(
-    format: &str,
-    source: &str,
-    attrs: &Attrs,
-    compiler: Option<&dyn RawBlockCompiler>,
-    out: &mut String,
-) {
-    if let Some(comp) = compiler {
-        match comp.compile(format, source) {
-            Ok(html) => out.push_str(&html),
-            Err(e) => {
-                Tag::new("pre").class("raw-error").open(out);
-                out.push_str(&escape_html(&e));
-                close_tag("pre", out);
-            }
+fn render_preview_block(lang: &str, source: &str, attrs: &Attrs, out: &mut String) {
+    // Read pre-compiled output from the CompileBlocks pass.
+    // If not compiled (no compiler was available), fall back to a code block.
+    let preview_html = match attrs.properties.get("compiled") {
+        Some(Value::Text(html)) => html.as_str(),
+        _ => {
+            render_code_block(lang, source, attrs, out);
+            return;
+        }
+    };
+
+    let id = &attrs.id;
+
+    // Open wrapper.
+    let mut wrapper = Tag::new("div").class("preview-block");
+    if !attrs.auto_id {
+        wrapper = wrapper.attr("id", id);
+    }
+    wrapper.open(out);
+
+    // Radio inputs for CSS-only tab switching (preview checked by default).
+    out.push_str(&format!(
+        "<input type=\"radio\" name=\"{id}\" id=\"{id}-preview\" class=\"preview-tab-input\" checked>"
+    ));
+    out.push_str(&format!(
+        "<input type=\"radio\" name=\"{id}\" id=\"{id}-source\" class=\"preview-tab-input\">"
+    ));
+
+    // Tab labels.
+    out.push_str(&format!(
+        "<div class=\"preview-tabs\">\
+         <label for=\"{id}-preview\">Preview</label>\
+         <label for=\"{id}-source\">Source</label>\
+         </div>"
+    ));
+
+    // Preview panel.
+    out.push_str("<div class=\"preview-panel preview-output\">");
+    out.push_str(preview_html);
+    out.push_str("</div>");
+
+    // Source panel (reuse code block rendering without outer attrs).
+    out.push_str("<div class=\"preview-panel preview-source\">");
+    render_code_block_inner(lang, source, out);
+    out.push_str("</div>");
+
+    close_tag("div", out);
+}
+
+/// Render just the `<pre><code>` part of a code block, without node attributes.
+fn render_code_block_inner(lang: &str, source: &str, out: &mut String) {
+    if !lang.is_empty()
+        && let Some(highlighted) = highlight_code(lang, source)
+    {
+        Tag::new("pre").open(out);
+        Tag::new("code")
+            .class(&format!("language-{lang}"))
+            .open(out);
+        out.push_str(&highlighted);
+        out.push_str("</code></pre>");
+        return;
+    }
+    Tag::new("pre").open(out);
+    let mut code = Tag::new("code");
+    if !lang.is_empty() {
+        code = code.class(&format!("language-{lang}"));
+    }
+    code.open(out);
+    out.push_str(&escape_html(source));
+    out.push_str("</code></pre>");
+}
+
+fn highlight_code(lang: &str, source: &str) -> Option<String> {
+    let ss = SyntaxSet::load_defaults_newlines();
+    let ts = ThemeSet::load_defaults();
+    let syntax = ss.find_syntax_by_token(lang)?;
+    let theme = &ts.themes["base16-ocean.dark"];
+    let full = highlighted_html_for_string(source, &ss, syntax, theme).ok()?;
+    // Strip syntect's outer <pre style="..."> wrapper — we provide our own <pre>
+    let inner = full
+        .strip_prefix("<pre style=\"")
+        .and_then(|s| s.find("\">").map(|i| &s[i + 2..]))
+        .and_then(|s| {
+            s.strip_suffix("</pre>\n")
+                .or_else(|| s.strip_suffix("</pre>"))
+        })
+        .unwrap_or(&full);
+    Some(inner.trim_start_matches('\n').to_string())
+}
+
+fn render_raw_block(format: &str, source: &str, attrs: &Attrs, out: &mut String) {
+    // Check for compilation error from CompileBlocks pass.
+    if let Some(Value::Text(e)) = attrs.properties.get("compile_error") {
+        Tag::new("pre").class("raw-error").open(out);
+        out.push_str(&escape_html(e));
+        close_tag("pre", out);
+        return;
+    }
+
+    // Check for compiled output from CompileBlocks pass.
+    if let Some(Value::Text(html)) = attrs.properties.get("compiled") {
+        let has_user_attrs = !attrs.classes.is_empty()
+            || (!attrs.id.is_empty() && !attrs.auto_id)
+            || attrs
+                .properties
+                .keys()
+                .any(|k| k != "compiled" && k != "compile_error" && k != "preview");
+        if has_user_attrs {
+            Tag::new("div").ast_attrs(attrs).open(out);
+            out.push_str(html);
+            close_tag("div", out);
+        } else {
+            out.push_str(html);
         }
         return;
     }
+
+    // No compilation result — fallback (no compiler was available).
     Tag::new("pre")
         .ast_attrs(attrs)
         .attr("data-format", format)
@@ -312,7 +428,7 @@ mod tests {
     fn render(md: &str) -> String {
         reset_id_counter();
         let doc = parse(md).unwrap();
-        render_html(&doc, None)
+        render_html(&doc)
     }
 
     #[test]
@@ -349,7 +465,9 @@ mod tests {
         let html = render("```rust\nfn main() {}\n```");
         assert!(html.contains("<pre"));
         assert!(html.contains("class=\"language-rust\""));
-        assert!(html.contains("fn main() {}"));
+        // Syntax-highlighted: tokens are wrapped in styled spans
+        assert!(html.contains("fn"));
+        assert!(html.contains("main"));
     }
 
     #[test]
@@ -450,6 +568,9 @@ mod tests {
 
     // -- raw block tests with compiler --
 
+    use crate::ast::RawBlockCompiler;
+    use crate::visit::Pass;
+
     struct TestCompiler;
 
     impl RawBlockCompiler for TestCompiler {
@@ -464,9 +585,11 @@ mod tests {
 
     fn render_with_compiler(md: &str) -> String {
         reset_id_counter();
-        let doc = parse(md).unwrap();
+        let mut doc = parse(md).unwrap();
+        crate::resolve::resolve_document(&mut doc);
         let comp = TestCompiler;
-        render_html(&doc, Some(&comp))
+        crate::resolve::CompileBlocks::new(&comp).run(&mut doc);
+        render_html(&doc)
     }
 
     #[test]
@@ -484,6 +607,27 @@ mod tests {
         // Falls back to escaped <pre> with data-format
         assert!(html.contains("data-format=\"html\""));
         assert!(html.contains("&lt;div&gt;hello&lt;/div&gt;"));
+    }
+
+    #[test]
+    fn raw_block_with_attrs_wraps_in_div() {
+        let html = render_with_compiler("```{=typst .center}\n#rect()\n```");
+        assert!(
+            html.contains("<div class=\"center\">"),
+            "compiled raw block with attrs should be wrapped in <div>: {html}"
+        );
+        assert!(html.contains("</div>"));
+    }
+
+    #[test]
+    fn raw_block_without_attrs_no_wrapper() {
+        let html = render_with_compiler("```{=typst}\n#rect()\n```");
+        // The compiler output is <div class="typst">…</div>; there should be
+        // no extra wrapper <div> around it.
+        assert!(
+            !html.contains("<div><div") && !html.contains("<div class=\"center\""),
+            "compiled raw block without attrs should not have wrapper <div>: {html}"
+        );
     }
 
     #[test]
@@ -514,6 +658,86 @@ mod tests {
         let html = render("```html\n<div>hello</div>\n```");
         assert!(html.contains("<pre"));
         assert!(html.contains("language-html"));
-        assert!(html.contains("&lt;div&gt;"));
+        // Content is rendered (either escaped or in styled spans)
+        assert!(html.contains("div"));
+        assert!(html.contains("hello"));
+    }
+
+    // -- preview block tests --
+
+    #[test]
+    fn preview_block_with_property() {
+        let html = render_with_compiler("```html {preview}\n<strong>hello</strong>\n```");
+        assert!(html.contains("class=\"preview-block\""));
+        assert!(html.contains("class=\"preview-tabs\""));
+        // Preview panel contains compiled output (html passthrough)
+        assert!(html.contains("<strong>hello</strong>"));
+        // Source panel contains syntax-highlighted code
+        assert!(html.contains("class=\"preview-panel preview-source\""));
+        assert!(html.contains("language-html"));
+    }
+
+    #[test]
+    fn preview_block_with_format_override() {
+        let html = render_with_compiler("```typst {preview=\"typst\"}\n#rect()\n```");
+        assert!(html.contains("class=\"preview-block\""));
+        // Compiled via typst format
+        assert!(html.contains("<div class=\"typst\">#rect()</div>"));
+    }
+
+    #[test]
+    fn preview_block_without_compiler_falls_back() {
+        // No compiler available — fall back to normal code block.
+        let html = render("```html {preview}\n<strong>hello</strong>\n```");
+        assert!(!html.contains("preview-block"));
+        assert!(html.contains("<pre"));
+        assert!(html.contains("language-html"));
+    }
+
+    #[test]
+    fn preview_unsupported_format_falls_back() {
+        // When the compiler doesn't support the format, fall back to normal code block.
+        let html = render_with_compiler("```mermaid {preview}\ngraph TD\n```");
+        assert!(!html.contains("preview-block"));
+        assert!(html.contains("<pre"));
+    }
+
+    #[test]
+    fn preview_block_via_cascade() {
+        let html =
+            render_with_compiler("{@hint(code-block, preview=true)}\n\n```html\n<em>hi</em>\n```");
+        assert!(html.contains("class=\"preview-block\""));
+        assert!(html.contains("<em>hi</em>"));
+    }
+
+    #[test]
+    fn no_preview_without_attr() {
+        let html = render_with_compiler("```html\n<div>hello</div>\n```");
+        assert!(!html.contains("preview-block"));
+        assert!(html.contains("<pre"));
+        assert!(html.contains("language-html"));
+    }
+
+    #[test]
+    fn raw_block_preview_via_property() {
+        let html = render_with_compiler("```{=html preview}\n<strong>hi</strong>\n```");
+        assert!(html.contains("preview-block"));
+        assert!(html.contains("<strong>hi</strong>"));
+    }
+
+    #[test]
+    fn raw_block_preview_via_cascade() {
+        let html = render_with_compiler(
+            "{@hint(raw-block, preview=true)}\n\n```{=html}\n<em>hi</em>\n```",
+        );
+        assert!(html.contains("preview-block"));
+        assert!(html.contains("<em>hi</em>"));
+    }
+
+    #[test]
+    fn raw_block_no_preview_without_attr() {
+        let html = render_with_compiler("```{=html}\n<div>hello</div>\n```");
+        assert!(!html.contains("preview-block"));
+        assert!(html.contains("<div>hello</div>"));
     }
 }

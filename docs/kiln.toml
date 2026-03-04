@@ -6,3 +6,11 @@ author = ""
 
 [build]
 slug_pattern = "^\\d+-(.+)$"
+
+[[hints]]
+kind = "CodeBlock"
+preview = true
+
+[[hints]]
+kind = "RawBlock"
+preview = true

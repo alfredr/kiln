@@ -2,8 +2,6 @@
 title: "Content"
 ---
 
-# Content
-
 Kiln organizes your writing into two kinds of content: **posts** and **pages**. Both live in a single `content/` directory, which is scanned recursively. The distinction is simple: if a piece of content has a `date` in its frontmatter, it's a post. If it doesn't, it's a page.
 
 ## Layouts

@@ -2,8 +2,6 @@
 title: "Templates"
 ---
 
-# Templates
-
 kiln uses [Tera](https://keats.github.io/tera/), a Jinja2-like template engine for Rust. Templates control the HTML structure of every page on your site. They live in the `templates/` directory (configurable via `kiln.toml`) and use standard Tera syntax: `{{ variables }}`, `{% blocks %}`, `{# comments #}`, filters, and template inheritance.
 
 ## Required Template Files

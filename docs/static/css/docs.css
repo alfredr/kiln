@@ -266,6 +266,28 @@ article h1 {
   margin-top: 0.5rem;
 }
 
+.doc-body > svg,
+.doc-body > div > svg {
+  display: block;
+  overflow: visible;
+  margin: 1em 0 1.25em;
+  max-width: 100%;
+  height: auto;
+}
+
+/* Utility classes for raw block output */
+.center {
+  text-align: center;
+}
+.center > svg {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.doc-body section {
+  overflow: visible;
+}
+
 .doc-body .math {
   font-family: 'KaTeX_Main', 'Times New Roman', serif;
   font-style: italic;
@@ -276,6 +298,67 @@ article h1 {
   text-align: center;
   margin: 1.5em 0;
   font-size: 1.2em;
+}
+
+/* Preview block tabs */
+
+.preview-tab-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.doc-body .preview-block {
+  margin-bottom: 1.25em;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.preview-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--inline-code-bg);
+}
+
+.preview-tabs label {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+}
+
+.preview-tabs label:hover {
+  color: var(--text);
+}
+
+.preview-tab-input:nth-of-type(1):checked ~ .preview-tabs label:nth-child(1),
+.preview-tab-input:nth-of-type(2):checked ~ .preview-tabs label:nth-child(2) {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.preview-panel {
+  display: none;
+}
+
+.preview-tab-input:nth-of-type(1):checked ~ .preview-output {
+  display: block;
+}
+
+.preview-tab-input:nth-of-type(2):checked ~ .preview-source {
+  display: block;
+}
+
+.preview-output {
+  padding: 1rem 1.25rem;
+}
+
+.preview-source pre {
+  margin-bottom: 0;
+  border-radius: 0;
 }
 
 /* Responsive */

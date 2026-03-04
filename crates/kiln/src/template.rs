@@ -92,7 +92,11 @@ fn build_nav_tree(node: &ContentNode, number_prefix: &str) -> NavNode {
         .iter()
         .enumerate()
         .map(|(i, child)| {
-            let prefix = if number_prefix.is_empty() { String::new() } else { format!("{number_prefix}.") };
+            let prefix = if number_prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{number_prefix}.")
+            };
             let child_number = format!("{prefix}{}", i + 1);
             build_nav_tree(child, &child_number)
         })
@@ -186,11 +190,7 @@ pub fn render_page(
     })
 }
 
-pub fn render_index(
-    tera: &Tera,
-    config: &Config,
-    tree: &ContentTree,
-) -> anyhow::Result<String> {
+pub fn render_index(tera: &Tera, config: &Config, tree: &ContentTree) -> anyhow::Result<String> {
     let mut ctx = tera::Context::new();
     insert_site(&mut ctx, config);
     insert_nav(&mut ctx, tree);
@@ -202,7 +202,7 @@ pub fn render_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{ContentItem, ContentKind, ContentNode, ContentTree};
+    use crate::content::{ContentItem, ContentKind, ContentNode};
     use kiln_doc::ast::Metadata;
     use std::path::PathBuf;
 
@@ -225,6 +225,7 @@ mod tests {
                 author: "Tester".to_string(),
             },
             build: crate::config::BuildConfig::default(),
+            hints: vec![],
         }
     }
 
@@ -246,13 +247,16 @@ mod tests {
 
     #[test]
     fn post_entries_basic() {
-        let item = test_item("hello", Metadata {
-            title: Some("Hello World".to_string()),
-            date: Some("2026-01-01".to_string()),
-            summary: Some("A post".to_string()),
-            tags: vec!["rust".to_string(), "web".to_string()],
-            ..Default::default()
-        });
+        let item = test_item(
+            "hello",
+            Metadata {
+                title: Some("Hello World".to_string()),
+                date: Some("2026-01-01".to_string()),
+                summary: Some("A post".to_string()),
+                tags: vec!["rust".to_string(), "web".to_string()],
+                ..Default::default()
+            },
+        );
         let entries = post_entries(&[item]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "Hello World");
@@ -273,10 +277,13 @@ mod tests {
 
     #[test]
     fn page_entries_basic() {
-        let item = test_item("about", Metadata {
-            title: Some("About Us".to_string()),
-            ..Default::default()
-        });
+        let item = test_item(
+            "about",
+            Metadata {
+                title: Some("About Us".to_string()),
+                ..Default::default()
+            },
+        );
         let entries = page_entries(&[item]);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "About Us");
@@ -292,11 +299,14 @@ mod tests {
 
     #[test]
     fn build_nav_tree_post() {
-        let item = test_item("my-post", Metadata {
-            title: Some("Post Title".to_string()),
-            date: Some("2026-01-01".to_string()),
-            ..Default::default()
-        });
+        let item = test_item(
+            "my-post",
+            Metadata {
+                title: Some("Post Title".to_string()),
+                date: Some("2026-01-01".to_string()),
+                ..Default::default()
+            },
+        );
         let node = leaf_node(ContentKind::Post(item));
         let nav = build_nav_tree(&node, "1");
         assert_eq!(nav.title, "Post Title");
@@ -307,10 +317,13 @@ mod tests {
 
     #[test]
     fn build_nav_tree_page() {
-        let item = test_item("about", Metadata {
-            title: Some("About".to_string()),
-            ..Default::default()
-        });
+        let item = test_item(
+            "about",
+            Metadata {
+                title: Some("About".to_string()),
+                ..Default::default()
+            },
+        );
         let node = leaf_node(ContentKind::Page(item));
         let nav = build_nav_tree(&node, "2");
         assert_eq!(nav.title, "About");
@@ -320,7 +333,9 @@ mod tests {
 
     #[test]
     fn build_nav_tree_virtual() {
-        let node = leaf_node(ContentKind::Virtual { slug: "guides".to_string() });
+        let node = leaf_node(ContentKind::Virtual {
+            slug: "guides".to_string(),
+        });
         let nav = build_nav_tree(&node, "");
         assert_eq!(nav.title, "guides");
         assert!(!nav.is_post);
@@ -330,21 +345,30 @@ mod tests {
 
     #[test]
     fn build_nav_tree_numbering() {
-        let child1 = leaf_node(ContentKind::Page(test_item("a", Metadata {
-            title: Some("A".to_string()),
-            ..Default::default()
-        })));
-        let child2 = leaf_node(ContentKind::Page(test_item("b", Metadata {
-            title: Some("B".to_string()),
-            ..Default::default()
-        })));
+        let child1 = leaf_node(ContentKind::Page(test_item(
+            "a",
+            Metadata {
+                title: Some("A".to_string()),
+                ..Default::default()
+            },
+        )));
+        let child2 = leaf_node(ContentKind::Page(test_item(
+            "b",
+            Metadata {
+                title: Some("B".to_string()),
+                ..Default::default()
+            },
+        )));
         let parent = ContentNode {
             path: "docs".to_string(),
             slug: "docs".to_string(),
-            kind: ContentKind::Page(test_item("docs", Metadata {
-                title: Some("Docs".to_string()),
-                ..Default::default()
-            })),
+            kind: ContentKind::Page(test_item(
+                "docs",
+                Metadata {
+                    title: Some("Docs".to_string()),
+                    ..Default::default()
+                },
+            )),
             children: vec![child1, child2],
             position: 0,
         };

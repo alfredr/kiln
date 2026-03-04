@@ -2,8 +2,6 @@
 title: "Getting Started"
 ---
 
-# Getting Started
-
 This guide walks you through installing kiln, creating your first site, building it, and previewing it locally.
 
 ## Installation

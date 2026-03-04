@@ -9,7 +9,7 @@ use attrs::{
     apply_brace_attrs, extract_raw_format, maybe_extract_trailing_attrs_from_children,
     parse_directive_to_node,
 };
-use block::{parse_blocks, RawBlock};
+use block::{RawBlock, parse_blocks};
 use inline::parse_inline;
 use section::build_section_tree;
 
@@ -77,7 +77,10 @@ fn extract_frontmatter(input: &str) -> Result<(Metadata, &str), ParseError> {
             // No closing --- found, treat entire input as body
             return Ok((Metadata::default(), input));
         }
-        let line_end = rest[pos..].find('\n').map(|i| pos + i).unwrap_or(rest.len());
+        let line_end = rest[pos..]
+            .find('\n')
+            .map(|i| pos + i)
+            .unwrap_or(rest.len());
         let line = rest[pos..line_end].trim();
         if line == "---" {
             break yaml_start + pos;
@@ -103,7 +106,10 @@ fn is_single_image(children: &[Node]) -> bool {
 }
 
 fn promote_to_figure(children: Vec<Node>) -> Node {
-    let img = children.into_iter().next().expect("is_single_image verified one child");
+    let img = children
+        .into_iter()
+        .next()
+        .expect("is_single_image verified one child");
     let alt_text = if let NodeKind::Image { alt, .. } = &img.kind {
         alt.clone()
     } else {
@@ -246,7 +252,10 @@ mod tests {
         assert!(matches!(sec1.kind, NodeKind::Section { level: 1 }));
         // level-1 section has: heading, paragraph, level-2 section, level-2 section
         // First child is the heading
-        assert!(matches!(sec1.children[0].kind, NodeKind::Heading { level: 1 }));
+        assert!(matches!(
+            sec1.children[0].kind,
+            NodeKind::Heading { level: 1 }
+        ));
     }
 
     #[test]
@@ -274,7 +283,11 @@ mod tests {
         let sec = &doc.content;
         let code = &sec.children[0];
         assert!(matches!(code.kind, NodeKind::CodeBlock { .. }));
-        if let NodeKind::CodeBlock { ref lang, ref source } = code.kind {
+        if let NodeKind::CodeBlock {
+            ref lang,
+            ref source,
+        } = code.kind
+        {
             assert_eq!(lang, "rust");
             assert_eq!(source, "fn main() {}");
         }
@@ -323,7 +336,10 @@ mod tests {
         let doc = parse_ok("The equation $E = mc^2$ is famous.");
         let para = &doc.content.children[0];
         // Should contain: Text, Math(inline), Text
-        let has_math = para.children.iter().any(|n| matches!(n.kind, NodeKind::Math { display: false, .. }));
+        let has_math = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Math { display: false, .. }));
         assert!(has_math);
     }
 
@@ -331,7 +347,10 @@ mod tests {
     fn display_math() {
         let doc = parse_ok("$$\nE^2 = (pc)^2\n$$");
         let para = &doc.content.children[0];
-        let has_math = para.children.iter().any(|n| matches!(n.kind, NodeKind::Math { display: true, .. }));
+        let has_math = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Math { display: true, .. }));
         assert!(has_math);
     }
 
@@ -339,9 +358,10 @@ mod tests {
     fn citation() {
         let doc = parse_ok("See [@knuth1997] for details.");
         let para = &doc.content.children[0];
-        let has_cite = para.children.iter().any(|n| {
-            matches!(n.kind, NodeKind::Citation { ref key } if key == "knuth1997")
-        });
+        let has_cite = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Citation { ref key } if key == "knuth1997"));
         assert!(has_cite);
     }
 
@@ -349,9 +369,10 @@ mod tests {
     fn cross_ref() {
         let doc = parse_ok("See @fig:arch for the diagram.");
         let para = &doc.content.children[0];
-        let has_ref = para.children.iter().any(|n| {
-            matches!(n.kind, NodeKind::CrossRef { ref target } if target == "fig:arch")
-        });
+        let has_ref = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::CrossRef { ref target } if target == "fig:arch"));
         assert!(has_ref);
     }
 
@@ -359,9 +380,10 @@ mod tests {
     fn link() {
         let doc = parse_ok("Visit [example](https://example.com) now.");
         let para = &doc.content.children[0];
-        let has_link = para.children.iter().any(|n| {
-            matches!(n.kind, NodeKind::Link { ref url } if url == "https://example.com")
-        });
+        let has_link = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Link { ref url } if url == "https://example.com"));
         assert!(has_link);
     }
 
@@ -384,7 +406,13 @@ mod tests {
     fn ordered_list() {
         let doc = parse_ok("1. first\n2. second\n3. third");
         let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(1) }));
+        assert!(matches!(
+            list.kind,
+            NodeKind::List {
+                ordered: true,
+                start: Some(1)
+            }
+        ));
         assert_eq!(list.children.len(), 3);
     }
 
@@ -398,7 +426,12 @@ mod tests {
     #[test]
     fn thematic_break() {
         let doc = parse_ok("text\n\n---\n\nmore text");
-        assert!(doc.content.children.iter().any(|n| matches!(n.kind, NodeKind::ThematicBreak)));
+        assert!(
+            doc.content
+                .children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::ThematicBreak))
+        );
     }
 
     #[test]
@@ -406,7 +439,10 @@ mod tests {
         let doc = parse_ok("Email me at user\\@example.com");
         let para = &doc.content.children[0];
         // Should NOT have a cross-ref node
-        let has_ref = para.children.iter().any(|n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        let has_ref = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::CrossRef { .. }));
         assert!(!has_ref);
     }
 
@@ -425,7 +461,11 @@ mod tests {
         let sec_a = &doc.content.children[0];
         assert!(matches!(sec_a.kind, NodeKind::Section { level: 1 }));
         // B and D are children of A
-        let sub_sections: Vec<_> = sec_a.children.iter().filter(|n| matches!(n.kind, NodeKind::Section { .. })).collect();
+        let sub_sections: Vec<_> = sec_a
+            .children
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Section { .. }))
+            .collect();
         assert_eq!(sub_sections.len(), 2);
     }
 
@@ -433,9 +473,10 @@ mod tests {
     fn inline_code() {
         let doc = parse_ok("Use `println!` macro.");
         let para = &doc.content.children[0];
-        let has_code = para.children.iter().any(|n| {
-            matches!(n.kind, NodeKind::Code(ref s) if s == "println!")
-        });
+        let has_code = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Code(ref s) if s == "println!"));
         assert!(has_code);
     }
 
@@ -443,7 +484,10 @@ mod tests {
     fn strikethrough() {
         let doc = parse_ok("This is ~~deleted~~ text.");
         let para = &doc.content.children[0];
-        let has_del = para.children.iter().any(|n| matches!(n.kind, NodeKind::Strikethrough));
+        let has_del = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Strikethrough));
         assert!(has_del);
     }
 
@@ -451,15 +495,18 @@ mod tests {
     fn series_directive() {
         let doc = parse_ok("{@series(figs, label=\"Figure\", display=hierarchical)}");
         // Should produce a custom node with the series declaration
-        let has_series = doc.content.children.iter().any(|n| {
-            !n.attrs.declarations.is_empty()
-        });
+        let has_series = doc
+            .content
+            .children
+            .iter()
+            .any(|n| !n.attrs.declarations.is_empty());
         assert!(has_series);
     }
 
     #[test]
     fn table_basic() {
-        let doc = parse_ok("| Name | Value |\n|------|-------|\n| foo  | 1     |\n| bar  | 2     |");
+        let doc =
+            parse_ok("| Name | Value |\n|------|-------|\n| foo  | 1     |\n| bar  | 2     |");
         let table = &doc.content.children[0];
         assert!(matches!(table.kind, NodeKind::Table));
         assert_eq!(table.children.len(), 3); // 1 header row + 2 data rows
@@ -470,12 +517,31 @@ mod tests {
         let html = {
             reset_id_counter();
             let doc = parse("| A | B |\n|---|---|\n| 1 | 2 |").unwrap();
-            crate::html::render_html(&doc, None)
+            crate::html::render_html(&doc)
         };
         assert!(html.contains("<thead>"));
         assert!(html.contains("<th>"));
         assert!(html.contains("<tbody>"));
         assert!(html.contains("<td>"));
+    }
+
+    #[test]
+    fn table_escaped_pipe() {
+        let doc = parse_ok("| Expr | Result |\n|------|--------|\n| a \\| b | OR |");
+        let table = &doc.content.children[0];
+        assert!(matches!(table.kind, NodeKind::Table));
+        // Should be 2 rows (header + 1 data), each with 2 cells
+        assert_eq!(table.children.len(), 2);
+        assert_eq!(table.children[1].children.len(), 2);
+    }
+
+    #[test]
+    fn table_pipe_in_code_span() {
+        let doc = parse_ok("| Code | Result |\n|------|--------|\n| `a | b` | OR |");
+        let table = &doc.content.children[0];
+        assert!(matches!(table.kind, NodeKind::Table));
+        assert_eq!(table.children.len(), 2);
+        assert_eq!(table.children[1].children.len(), 2);
     }
 
     #[test]
@@ -552,7 +618,13 @@ mod tests {
     fn ordered_list_paren() {
         let doc = parse_ok("1) first\n2) second");
         let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(1) }));
+        assert!(matches!(
+            list.kind,
+            NodeKind::List {
+                ordered: true,
+                start: Some(1)
+            }
+        ));
         assert_eq!(list.children.len(), 2);
     }
 
@@ -561,14 +633,20 @@ mod tests {
         let doc = parse_ok("text\n# Heading");
         // Root should have: paragraph, then section with heading
         assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(doc.content.children[1].kind, NodeKind::Section { level: 1 }));
+        assert!(matches!(
+            doc.content.children[1].kind,
+            NodeKind::Section { level: 1 }
+        ));
     }
 
     #[test]
     fn paragraph_interrupted_by_fence() {
         let doc = parse_ok("text\n```\ncode\n```");
         assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(doc.content.children[1].kind, NodeKind::CodeBlock { .. }));
+        assert!(matches!(
+            doc.content.children[1].kind,
+            NodeKind::CodeBlock { .. }
+        ));
     }
 
     #[test]
@@ -582,7 +660,10 @@ mod tests {
     fn paragraph_interrupted_by_list() {
         let doc = parse_ok("text\n- item");
         assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(doc.content.children[1].kind, NodeKind::List { .. }));
+        assert!(matches!(
+            doc.content.children[1].kind,
+            NodeKind::List { .. }
+        ));
     }
 
     #[test]
@@ -595,13 +676,23 @@ mod tests {
     #[test]
     fn thematic_break_stars() {
         let doc = parse_ok("text\n\n***\n\nmore");
-        assert!(doc.content.children.iter().any(|n| matches!(n.kind, NodeKind::ThematicBreak)));
+        assert!(
+            doc.content
+                .children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::ThematicBreak))
+        );
     }
 
     #[test]
     fn thematic_break_underscores() {
         let doc = parse_ok("text\n\n___\n\nmore");
-        assert!(doc.content.children.iter().any(|n| matches!(n.kind, NodeKind::ThematicBreak)));
+        assert!(
+            doc.content
+                .children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::ThematicBreak))
+        );
     }
 
     #[test]
@@ -617,7 +708,10 @@ mod tests {
     fn strong_emphasis_combo() {
         let doc = parse_ok("***bold italic***");
         let para = &doc.content.children[0];
-        let has_strong = para.children.iter().any(|n| matches!(n.kind, NodeKind::Strong));
+        let has_strong = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Strong));
         assert!(has_strong);
     }
 
@@ -625,8 +719,14 @@ mod tests {
     fn underscore_emphasis() {
         let doc = parse_ok("_italic_ and __bold__");
         let para = &doc.content.children[0];
-        let has_em = para.children.iter().any(|n| matches!(n.kind, NodeKind::Emphasis));
-        let has_strong = para.children.iter().any(|n| matches!(n.kind, NodeKind::Strong));
+        let has_em = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Emphasis));
+        let has_strong = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Strong));
         assert!(has_em);
         assert!(has_strong);
     }
@@ -635,21 +735,33 @@ mod tests {
     fn hard_break_two_spaces() {
         let doc = parse_ok("line1  \nline2");
         let para = &doc.content.children[0];
-        assert!(para.children.iter().any(|n| matches!(n.kind, NodeKind::HardBreak)));
+        assert!(
+            para.children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::HardBreak))
+        );
     }
 
     #[test]
     fn hard_break_backslash() {
         let doc = parse_ok("line1\\\nline2");
         let para = &doc.content.children[0];
-        assert!(para.children.iter().any(|n| matches!(n.kind, NodeKind::HardBreak)));
+        assert!(
+            para.children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::HardBreak))
+        );
     }
 
     #[test]
     fn soft_break() {
         let doc = parse_ok("line1\nline2");
         let para = &doc.content.children[0];
-        assert!(para.children.iter().any(|n| matches!(n.kind, NodeKind::SoftBreak)));
+        assert!(
+            para.children
+                .iter()
+                .any(|n| matches!(n.kind, NodeKind::SoftBreak))
+        );
     }
 
     #[test]
@@ -657,9 +769,10 @@ mod tests {
         let doc = parse_ok("\\z");
         let para = &doc.content.children[0];
         // Backslash before non-escapable char should remain as literal text
-        let has_text = para.children.iter().any(|n| {
-            matches!(n.kind, NodeKind::Text(ref t) if t.contains('\\'))
-        });
+        let has_text = para
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Text(ref t) if t.contains('\\')));
         assert!(has_text);
     }
 
@@ -667,7 +780,11 @@ mod tests {
     fn multiple_citations() {
         let doc = parse_ok("[@a; @b; @c]");
         let para = &doc.content.children[0];
-        let cite_count = para.children.iter().filter(|n| matches!(n.kind, NodeKind::Citation { .. })).count();
+        let cite_count = para
+            .children
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Citation { .. }))
+            .count();
         assert_eq!(cite_count, 3);
     }
 
@@ -678,7 +795,10 @@ mod tests {
         let doc = parse_ok("*emphasized* {.highlight}");
         let para = &doc.content.children[0];
         // Trailing {.highlight} applies to the preceding emphasis node
-        let has_class = para.children.iter().any(|n| n.attrs.classes.contains(&"highlight".to_string()));
+        let has_class = para
+            .children
+            .iter()
+            .any(|n| n.attrs.classes.contains(&"highlight".to_string()));
         assert!(has_class);
     }
 
@@ -686,7 +806,10 @@ mod tests {
     fn inline_trailing_attrs_on_link() {
         let doc = parse_ok("[click](url) {.btn}");
         let para = &doc.content.children[0];
-        let link = para.children.iter().find(|n| matches!(n.kind, NodeKind::Link { .. }));
+        let link = para
+            .children
+            .iter()
+            .find(|n| matches!(n.kind, NodeKind::Link { .. }));
         assert!(link.is_some());
         assert!(link.unwrap().attrs.classes.contains(&"btn".to_string()));
     }
@@ -700,8 +823,12 @@ mod tests {
 
     #[test]
     fn hint_directive() {
-        let doc = parse_ok("{@hint(id_prefix(\"fig:\"), series=figs)}");
-        let has_hint = doc.content.children.iter().any(|n| !n.attrs.hints.is_empty());
+        let doc = parse_ok("{@hint(figure, series=figs)}");
+        let has_hint = doc
+            .content
+            .children
+            .iter()
+            .any(|n| !n.attrs.hints.is_empty());
         assert!(has_hint);
     }
 
@@ -731,13 +858,19 @@ mod tests {
         let fig = &doc.content.children[0];
         assert!(matches!(fig.kind, NodeKind::Figure));
         // No caption since alt is empty
-        let has_caption = fig.children.iter().any(|n| matches!(n.kind, NodeKind::Caption));
+        let has_caption = fig
+            .children
+            .iter()
+            .any(|n| matches!(n.kind, NodeKind::Caption));
         assert!(!has_caption);
     }
 
     #[test]
     fn directive_error_display() {
-        let err = ParseError::Directive { line: 5, message: "bad".to_string() };
+        let err = ParseError::Directive {
+            line: 5,
+            message: "bad".to_string(),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("directive"));
         assert!(msg.contains("line 5"));

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -8,6 +9,8 @@ pub struct Config {
     pub site: SiteConfig,
     #[serde(default)]
     pub build: BuildConfig,
+    #[serde(default)]
+    pub hints: Vec<HintConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +36,20 @@ pub struct BuildConfig {
     pub static_dir: PathBuf,
     #[serde(default)]
     pub slug_pattern: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HintConfig {
+    /// CSS-like selector string (e.g. `"code-block[lang=\"rust\"]"`).
+    pub selector: Option<String>,
+    /// Legacy: match by kind name (PascalCase).
+    pub kind: Option<String>,
+    /// Legacy: match by CSS class.
+    pub class: Option<String>,
+    /// Legacy: match by explicit ID.
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub properties: HashMap<String, toml::Value>,
 }
 
 impl Default for BuildConfig {
@@ -71,8 +88,7 @@ impl Config {
         let path = project_root.join("kiln.toml");
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&text).with_context(|| "failed to parse kiln.toml")?;
+        let config: Config = toml::from_str(&text).with_context(|| "failed to parse kiln.toml")?;
         Ok(config)
     }
 }
@@ -87,7 +103,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("kiln.toml"),
             "[site]\ntitle = \"Test Site\"\nurl = \"https://example.com\"\nauthor = \"Alice\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let config = Config::load(tmp.path()).unwrap();
         assert_eq!(config.site.title, "Test Site");
@@ -101,7 +118,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("kiln.toml"),
             "[site]\ntitle = \"Minimal\"\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let config = Config::load(tmp.path()).unwrap();
         assert_eq!(config.site.title, "Minimal");
@@ -110,6 +128,24 @@ mod tests {
         assert_eq!(config.build.content_dir, PathBuf::from("content"));
         assert_eq!(config.build.output_dir, PathBuf::from("dist"));
         assert!(config.build.slug_pattern.is_none());
+    }
+
+    #[test]
+    fn load_hints_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("kiln.toml"),
+            "[site]\ntitle = \"Test\"\n\n[[hints]]\nkind = \"CodeBlock\"\npreview = true\n",
+        )
+        .unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.hints.len(), 1);
+        assert_eq!(config.hints[0].kind.as_deref(), Some("CodeBlock"));
+        assert_eq!(
+            config.hints[0].properties.get("preview"),
+            Some(&toml::Value::Boolean(true))
+        );
     }
 
     #[test]

@@ -139,7 +139,8 @@ fn try_scan_bracket(chars: &[char], pos: usize) -> Option<(Vec<Node>, usize)> {
         return None;
     }
     // Citation: [@key] or [@key1; @key2]
-    if pos + 1 < chars.len() && chars[pos + 1] == '@'
+    if pos + 1 < chars.len()
+        && chars[pos + 1] == '@'
         && let Some((keys, end)) = scan_citation(chars, pos)
     {
         let nodes = keys.into_iter().map(Node::citation).collect();
@@ -175,7 +176,9 @@ fn try_scan_emphasis_like(chars: &[char], pos: usize, ch: char) -> Option<(Node,
         return None;
     }
     // Strong + emphasis: ***...*** or ___...___
-    if pos + 2 < chars.len() && chars[pos + 1] == ch && chars[pos + 2] == ch
+    if pos + 2 < chars.len()
+        && chars[pos + 1] == ch
+        && chars[pos + 2] == ch
         && let Some((inner, end)) = scan_delimited(chars, pos + 3, &[ch, ch, ch])
     {
         let children = parse_inline(&inner);
@@ -183,7 +186,8 @@ fn try_scan_emphasis_like(chars: &[char], pos: usize, ch: char) -> Option<(Node,
         return Some((node, end));
     }
     // Strong: **...**  or __...__
-    if pos + 1 < chars.len() && chars[pos + 1] == ch
+    if pos + 1 < chars.len()
+        && chars[pos + 1] == ch
         && let Some((inner, end)) = scan_delimited(chars, pos + 2, &[ch, ch])
     {
         let children = parse_inline(&inner);
@@ -323,10 +327,7 @@ pub(super) fn find_matching_delim(
     None
 }
 
-fn scan_image_or_link(
-    chars: &[char],
-    bracket_pos: usize,
-) -> Option<(String, String, usize)> {
+fn scan_image_or_link(chars: &[char], bracket_pos: usize) -> Option<(String, String, usize)> {
     if chars[bracket_pos] != '[' {
         return None;
     }

@@ -2,8 +2,6 @@
 title: "Extensions"
 ---
 
-# Extensions
-
 Beyond standard markdown, kiln provides several syntax extensions for structured documents: brace attributes for annotating elements, cross-references for linking within a document, citations for academic-style references, and directives for controlling numbering and layout.
 
 ## Brace Attributes
@@ -162,23 +160,16 @@ Example declaring multiple series at the top of a document:
 
 ### Hints
 
-Set cascading property hints on elements matching a selector:
+Set cascading property hints on elements matching a CSS-like selector:
 
 ```markdown
-{@hint(kind("Heading"), numbering=true)}
-{@hint(class("wide"), width="100%")}
-{@hint(id("fig:main"), position="top")}
+{@hint(heading, numbering=true)}
+{@hint(.wide, width="100%")}
+{@hint(#fig-main, position="top")}
+{@hint(code-block[lang="rust"], theme="dark")}
 ```
 
-#### Selectors
-
-| Selector | Matches |
-| --- | --- |
-| `kind("Heading")` | All elements of the given AST node kind |
-| `class("wide")` | All elements with the specified CSS class |
-| `id("my-id")` | The element with the exact ID |
-| `id_prefix("fig:")` | All elements whose ID starts with the given prefix |
-| `this` | The element the directive is attached to (when used inside a brace attribute block) |
+Selectors support kind names (bare or alias), classes (`.wide`), IDs (`#intro`), attribute matching (`[lang="rust"]`), combinators (`>`/`~>`), and boolean expressions. See the [Selectors](08-selectors.md) page for full documentation.
 
 #### Using Hints in Brace Attributes
 
@@ -187,15 +178,6 @@ You can place a hint directive inside a brace attribute block to scope it to the
 ```markdown
 ## Chapter One {#ch1 {@hint(this, numbering=true)}}
 ```
-
-### Current Status
-
-Series declarations and hint directives are parsed and stored in kiln's AST, but **resolution and cascade evaluation are not yet active**. This means:
-
-- Declaring a series does not yet produce automatic numbering in the output.
-- Hint properties are not yet applied during rendering.
-
-These features are planned for a future release. Declaring them now ensures your documents are forward-compatible.
 
 ## Figure Promotion
 

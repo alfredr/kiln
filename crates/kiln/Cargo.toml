@@ -12,6 +12,7 @@ kiln-doc = { path = "../kiln-doc" }
 
 typst = "0.14"
 typst-html = "0.14"
+typst-svg = "0.14"
 typst-kit = { version = "0.14", features = ["embed-fonts", "fonts"] }
 typst-library = "0.14"
 typst-syntax = "0.14"
@@ -21,6 +22,7 @@ comemo = "0.4"
 ecow = "0.2"
 chrono = "0.4"
 
+mermaid-rs-renderer = { version = "0.2", default-features = false }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 tera = "1"

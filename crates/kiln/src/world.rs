@@ -22,14 +22,10 @@ pub struct KilnWorld {
 }
 
 impl KilnWorld {
-    pub fn new(main_path: &Path, root: &Path) -> anyhow::Result<Self> {
-        let main_path = main_path.canonicalize()?;
+    /// Create a world from an in-memory source string.
+    pub fn from_source(source_text: &str, root: &Path) -> anyhow::Result<Self> {
         let root = root.canonicalize()?;
-
-        let relative = main_path
-            .strip_prefix(&root)
-            .map_err(|_| anyhow::anyhow!("main file must be under root"))?;
-        let vpath = VirtualPath::new(relative);
+        let vpath = VirtualPath::new("__inline__.typ");
         let main_id = FileId::new(None, vpath);
 
         let library = Library::builder()
@@ -38,13 +34,16 @@ impl KilnWorld {
 
         let Fonts { book, fonts } = FontSearcher::new().search();
 
+        let mut sources = HashMap::new();
+        sources.insert(main_id, Source::new(main_id, source_text.to_string()));
+
         Ok(Self {
             library: LazyHash::new(library),
             book: LazyHash::new(book),
             fonts,
             main_id,
             root,
-            sources: Mutex::new(HashMap::new()),
+            sources: Mutex::new(sources),
             files: Mutex::new(HashMap::new()),
         })
     }

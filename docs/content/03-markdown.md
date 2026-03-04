@@ -2,8 +2,6 @@
 title: "Markdown Syntax"
 ---
 
-# Markdown Syntax
-
 Kiln uses its own markdown parser built from the CommonMark spec with several extensions. This page is a reference for every supported syntax element.
 
 ## Headings
@@ -228,7 +226,15 @@ print("Hello, kiln!")
 ~~~
 ```
 
-The language identifier is added as a class on the rendered `<code>` element (e.g. `class="language-rust"`), which client-side syntax highlighters can use.
+kiln automatically applies syntax highlighting at build time — no client-side JavaScript is needed. The highlighting uses the base16-ocean.dark color scheme with inline styles, so code blocks are colorized in the static HTML output. If a language identifier is not recognized, the code is rendered as plain text.
+
+For example, this Rust code block is highlighted automatically:
+
+```rust
+fn greet(name: &str) -> String {
+    format!("Hello, {}!", name)
+}
+```
 
 ## Thematic Breaks
 

@@ -60,9 +60,10 @@ pub async fn dev(
         Duration::from_millis(300),
         move |res: notify_debouncer_mini::DebounceEventResult| {
             if let Ok(events) = res
-                && !events.is_empty() {
-                    let _ = tx.try_send(());
-                }
+                && !events.is_empty()
+            {
+                let _ = tx.try_send(());
+            }
         },
     )?;
 

@@ -3,8 +3,6 @@ title: "Raw Blocks"
 slug: raw-blocks
 ---
 
-# Raw Blocks
-
 In standard Markdown, fenced code blocks render as `<pre><code>` elements — formatted source code displayed on the page. kiln extends this behavior with **raw blocks**: fenced code blocks marked with the `{=format}` attribute that are passed to a compiler for transformation instead of being rendered as code listings.
 
 ## How Raw Blocks Work
@@ -33,11 +31,12 @@ The difference is the `{=format}` attribute. Without it, every fenced code block
 
 kiln's built-in compiler handles these formats:
 
-| Format    | Attribute    | Purpose                                    |
-|-----------|--------------|--------------------------------------------|
-| `typst`   | `{=typst}`   | Typst markup, compiled to HTML             |
-| `mermaid` | `{=mermaid}` | Mermaid diagram definitions                |
-| `html`    | `{=html}`    | Raw HTML, passed through without escaping  |
+| Format       | Attribute       | Purpose                                          |
+|--------------|-----------------|--------------------------------------------------|
+| `typst`      | `{=typst}`      | Typst markup, compiled to inline SVG             |
+| `typst-html` | `{=typst-html}` | Typst markup, compiled to HTML (reflowable)      |
+| `mermaid`    | `{=mermaid}`    | Mermaid diagrams, compiled to inline SVG         |
+| `html`       | `{=html}`       | Raw HTML, passed through without escaping        |
 
 ## Typst Blocks
 
@@ -45,15 +44,26 @@ Typst is a modern typesetting system. kiln ships with built-in Typst compilation
 
 This is useful for mathematical notation, complex tables, styled boxes, and anything that benefits from Typst's powerful layout engine.
 
+There are two Typst output modes:
+
+- **`{=typst}`** — Compiles to inline SVG. Full visual fidelity: supports `rect`, `circle`, equations, custom layouts, and everything Typst can render. The SVG is embedded directly in the page.
+- **`{=typst-html}`** — Compiles to HTML. Produces lighter, reflowable output, but Typst's HTML export is incomplete — visual elements like `rect` and math equations may be dropped.
+
 ### Example
 
 ````
 ```{=typst}
-#rect(fill: blue, width: 100%, height: 2em)[Hello from Typst]
+#strong[Hello from Typst!] This content is _compiled_ at build time.
 ```
 ````
 
-kiln compiles this Typst source into HTML at build time and injects the result into your page. The output replaces the code block entirely — no `<pre>` or `<code>` tags are produced.
+This produces:
+
+```{=typst}
+#strong[Hello from Typst!] This content is _compiled_ at build time.
+```
+
+kiln compiles this Typst source into an inline SVG at build time and injects the result into your page. The output replaces the code block entirely — no `<pre>` or `<code>` tags are produced.
 
 ### A More Involved Example
 
@@ -73,7 +83,39 @@ kiln compiles this Typst source into HTML at build time and injects the result i
 ```
 ````
 
-This produces a rendered HTML table directly in the page, formatted by Typst.
+This produces:
+
+```{=typst}
+#let data = (
+  ("Category", "Value"),
+  ("Alpha", "42"),
+  ("Beta", "17"),
+  ("Gamma", "89"),
+)
+
+#table(
+  columns: 2,
+  ..data.flatten()
+)
+```
+
+### Typst HTML Mode
+
+Use `{=typst-html}` when you want lighter, reflowable HTML output instead of SVG. This works well for text-heavy content but does not support visual elements like `rect` or equations:
+
+````
+```{=typst-html}
+#strong[This is bold] and this is _emphasized_ text compiled to HTML.
+```
+````
+
+This produces:
+
+```{=typst-html}
+#strong[This is bold] and this is _emphasized_ text compiled to HTML.
+```
+
+Compare this with `{=typst}` (SVG) — the SVG version renders everything Typst supports, while the HTML version is smaller and flows with the page text but may drop visual elements.
 
 ## HTML Blocks
 
@@ -87,6 +129,14 @@ Use `{=html}` to inject raw HTML into your content without Markdown processing o
 ```
 ````
 
+This produces:
+
+```{=html}
+<div style="padding: 1em; background: #f0f0f0; border: 1px solid #ccc; border-radius: 4px;">
+  <strong>This HTML was injected directly</strong> — no Markdown processing applied.
+</div>
+```
+
 The HTML is inserted into the page output as-is. This is helpful for embedding widgets, iframes, or custom markup that Markdown cannot express.
 
 Note that ` ```html ` (without `{=html}`) renders as a normal code block — useful for showing HTML examples in documentation.
@@ -97,20 +147,21 @@ Mermaid is a diagramming language for creating flowcharts, sequence diagrams, Ga
 
 ````
 ```{=mermaid}
-graph TD
+flowchart LR
     A[Write Markdown] --> B[kiln build]
     B --> C[Static Site]
 ```
 ````
 
-Mermaid blocks are wrapped in a `<pre class="mermaid">` element for client-side rendering. Include the Mermaid JS library in your `base.html` template:
+This produces:
 
-```html
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({ startOnLoad: true });
-</script>
+```{=mermaid}
+flowchart LR
+    A[Write Markdown] --> B[kiln build]
+    B --> C[Static Site]
 ```
+
+kiln compiles Mermaid diagrams to inline SVG at build time using a native Rust renderer. No client-side JavaScript is required — the diagram is embedded directly in the page, just like Typst blocks.
 
 ## Behavior Without a Compiler
 
@@ -118,7 +169,7 @@ When kiln encounters a raw block but no compiler is available for it, the block 
 
 ```html
 <pre data-format="typst">
-#rect(fill: blue, width: 100%, height: 2em)[Hello from Typst]
+#strong[Hello from Typst!] This content is _compiled_ at build time.
 </pre>
 ```
 
@@ -129,10 +180,16 @@ The source content is preserved verbatim. This makes it possible to handle rende
 Raw blocks support additional brace attributes alongside the `=format` marker. You can attach IDs and classes:
 
 ````
-```{=typst #fig:diagram .wide}
-#rect(fill: green, width: 100%)[A wide diagram]
+```{=typst #fig:summary .wide}
+#emph[This block] has an ID and a class applied to its output element.
 ```
 ````
+
+This produces:
+
+```{=typst #fig:summary .wide}
+#emph[This block] has an ID and a class applied to its output element.
+```
 
 These attributes are applied to the output element, allowing you to target specific raw blocks with CSS or reference them with anchor links.
 

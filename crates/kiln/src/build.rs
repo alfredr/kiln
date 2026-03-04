@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use anyhow::Context;
+use typst::layout::PagedDocument;
 use typst_html::HtmlDocument;
 
 use crate::config::Config;
-use crate::content::{discover_content, ContentItem, ContentKind, ContentNode, ContentTree};
+use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
 use crate::template::{load_templates, render_index, render_page, render_post};
 use crate::world::KilnWorld;
 
@@ -17,29 +18,46 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
     fn compile(&self, format: &str, source: &str) -> Result<String, String> {
         match format {
             "html" => return Ok(source.to_string()),
-            "mermaid" => return Ok(format!("<pre class=\"mermaid\">{source}</pre>")),
-            "typst" => {}
+            "mermaid" => {
+                return mermaid_rs_renderer::render(source)
+                    .map_err(|e| format!("mermaid rendering failed: {e}"));
+            }
+            "typst" | "typst-html" => {}
             _ => return Err(format!("unsupported raw block format: {format}")),
         }
         let wrapped = format!("#set page(width: auto, height: auto, margin: 0pt)\n{source}");
 
-        let tmp_dir =
-            tempfile::tempdir().map_err(|e| format!("failed to create temp dir: {e}"))?;
-        let tmp_path = tmp_dir.path().join("block.typ");
-        std::fs::write(&tmp_path, &wrapped)
-            .map_err(|e| format!("failed to write temp file: {e}"))?;
-
-        let world = KilnWorld::new(&tmp_path, self.project_root)
+        let world = KilnWorld::from_source(&wrapped, self.project_root)
             .map_err(|e| format!("failed to create typst world: {e}"))?;
 
-        let typst::diag::Warned { output, warnings } =
-            typst::compile::<HtmlDocument>(&world);
+        if format == "typst-html" {
+            return self.compile_typst_html(&world);
+        }
+
+        let typst::diag::Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
 
         for warning in &warnings {
             eprintln!("    typst block warn: {warning:?}");
         }
 
-        let document = output.map_err(|errs| {
+        let document = output.map_err(|errs: ecow::EcoVec<typst::diag::SourceDiagnostic>| {
+            let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
+            format!("typst compilation failed: {}", msgs.join("; "))
+        })?;
+
+        Ok(typst_svg::svg_merged(&document, typst::layout::Abs::zero()))
+    }
+}
+
+impl TypstCompiler<'_> {
+    fn compile_typst_html(&self, world: &KilnWorld) -> Result<String, String> {
+        let typst::diag::Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
+
+        for warning in &warnings {
+            eprintln!("    typst block warn: {warning:?}");
+        }
+
+        let document = output.map_err(|errs: ecow::EcoVec<typst::diag::SourceDiagnostic>| {
             let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
             format!("typst compilation failed: {}", msgs.join("; "))
         })?;
@@ -49,7 +67,13 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
             format!("typst html encoding failed: {}", msgs.join("; "))
         })?;
 
-        Ok(extract_body(&raw_html))
+        // Extract content between <body> and </body>
+        let body_start = raw_html.find("<body>").map(|i| i + 6);
+        let body_end = raw_html.rfind("</body>");
+        Ok(match (body_start, body_end) {
+            (Some(start), Some(end)) if start < end => raw_html[start..end].trim().to_string(),
+            _ => raw_html,
+        })
     }
 }
 
@@ -83,9 +107,18 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     }
 
     let compiler = TypstCompiler { project_root };
+    let hints = config_hints(&config.hints);
 
     // Compile the content tree
-    compile_tree(config, &tera, &tree.root, &output_dir, &compiler, &tree)?;
+    compile_tree(
+        config,
+        &tera,
+        &tree.root,
+        &output_dir,
+        &compiler,
+        &tree,
+        &hints,
+    )?;
 
     // Generate index page
     let index_html = render_index(&tera, config, &tree)?;
@@ -107,6 +140,7 @@ fn compile_tree(
     output_dir: &Path,
     compiler: &TypstCompiler,
     tree: &ContentTree,
+    hints: &[kiln_doc::ast::Hint],
 ) -> anyhow::Result<()> {
     // Collect child content directory names for asset isolation
     let child_dirs: Vec<&str> = node
@@ -119,38 +153,136 @@ fn compile_tree(
         })
         .collect();
 
-    match &node.kind {
-        ContentKind::Post(post) => {
-            compile_post(config, tera, post, output_dir, compiler, tree, &child_dirs)?;
-        }
-        ContentKind::Page(page) => {
-            compile_page(config, tera, page, output_dir, compiler, tree, &child_dirs)?;
-        }
-        ContentKind::Virtual { .. } => {}
+    let item = match &node.kind {
+        ContentKind::Post(item) | ContentKind::Page(item) => Some(item),
+        ContentKind::Virtual { .. } => None,
+    };
+
+    if let Some(item) = item {
+        let is_post = matches!(node.kind, ContentKind::Post(_));
+        let label = if is_post { "post" } else { "page" };
+        eprintln!("  compiling {label}: {}", item.path);
+
+        let dest = if is_post {
+            output_dir.join("posts").join(&item.path)
+        } else {
+            output_dir.join(&item.path)
+        };
+
+        let mut inject = InjectHints(hints.to_vec());
+        let mut hoist = kiln_doc::resolve::HoistDirectives;
+        let mut cascade = kiln_doc::resolve::CascadeHints;
+        let mut compile = kiln_doc::resolve::CompileBlocks::new(compiler);
+        let passes: &mut [&mut dyn kiln_doc::visit::Pass] =
+            &mut [&mut inject, &mut hoist, &mut cascade, &mut compile];
+
+        let render_fn = if is_post { render_post } else { render_page };
+
+        compile_content(
+            &item.md_path,
+            &item.source_dir,
+            &dest,
+            &child_dirs,
+            passes,
+            |body| render_fn(tera, config, item, body, tree),
+        )?;
     }
 
     for child in &node.children {
-        compile_tree(config, tera, child, output_dir, compiler, tree)?;
+        compile_tree(config, tera, child, output_dir, compiler, tree, hints)?;
     }
 
     Ok(())
+}
+
+fn config_hints(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Hint> {
+    use kiln_doc::ast::{Hint, Value};
+
+    configs
+        .iter()
+        .flat_map(|cfg| {
+            let selector = parse_config_selector(cfg);
+            let Some(selector) = selector else {
+                return vec![];
+            };
+
+            cfg.properties
+                .iter()
+                .map(|(k, v)| Hint {
+                    selector: selector.clone(),
+                    property: k.clone(),
+                    value: match v {
+                        toml::Value::Boolean(b) => Value::Bool(*b),
+                        toml::Value::Integer(n) => Value::Number(*n as f64),
+                        toml::Value::Float(n) => Value::Number(*n),
+                        other => Value::Text(other.to_string()),
+                    },
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn parse_config_selector(cfg: &crate::config::HintConfig) -> Option<kiln_doc::ast::Selector> {
+    use kiln_doc::ast::{CompoundSelector, Selector, SelectorExpr};
+
+    if let Some(sel_str) = &cfg.selector {
+        let sel = kiln_doc::selector::parse_selector(sel_str);
+        if sel.is_none() {
+            eprintln!("  warning: invalid selector in config: {sel_str}");
+        }
+        return sel;
+    }
+    if let Some(k) = &cfg.kind {
+        let pascal = kiln_doc::selector::resolve_kind_name(k).unwrap_or(k.as_str());
+        return Some(Selector::Expr(SelectorExpr::Simple(CompoundSelector {
+            kind: Some(pascal.to_string()),
+            ..Default::default()
+        })));
+    }
+    if let Some(c) = &cfg.class {
+        return Some(Selector::Expr(SelectorExpr::Simple(CompoundSelector {
+            classes: vec![c.clone()],
+            ..Default::default()
+        })));
+    }
+    if let Some(id) = &cfg.id {
+        return Some(Selector::Expr(SelectorExpr::Simple(CompoundSelector {
+            id: Some(id.clone()),
+            ..Default::default()
+        })));
+    }
+    None
+}
+
+/// Pass that injects config-level hints onto the document root.
+struct InjectHints(Vec<kiln_doc::ast::Hint>);
+
+impl kiln_doc::visit::Pass for InjectHints {
+    fn run(&mut self, doc: &mut kiln_doc::ast::Document) {
+        doc.content.attrs.hints.extend(self.0.iter().cloned());
+    }
 }
 
 fn compile_content(
     md_path: &Path,
     source_dir: &Path,
     dest_dir: &Path,
-    compiler: &TypstCompiler,
     skip_dirs: &[&str],
+    passes: &mut [&mut dyn kiln_doc::visit::Pass],
     render_fn: impl FnOnce(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let markdown = std::fs::read_to_string(md_path)
         .with_context(|| format!("failed to read {}", md_path.display()))?;
 
-    let doc = kiln_doc::parse::parse(&markdown)
+    let mut doc = kiln_doc::parse::parse(&markdown)
         .map_err(|e| anyhow::anyhow!("parse error in '{}': {e}", md_path.display()))?;
 
-    let body_html = kiln_doc::html::render_html(&doc, Some(compiler));
+    for pass in passes.iter_mut() {
+        pass.run(&mut doc);
+    }
+
+    let body_html = kiln_doc::html::render_html(&doc);
     let full_html = render_fn(&body_html)?;
 
     std::fs::create_dir_all(dest_dir)?;
@@ -159,38 +291,6 @@ fn compile_content(
     copy_assets(source_dir, dest_dir, skip_dirs)?;
 
     Ok(())
-}
-
-fn compile_post(
-    config: &Config,
-    tera: &tera::Tera,
-    post: &ContentItem,
-    output_dir: &Path,
-    compiler: &TypstCompiler,
-    tree: &ContentTree,
-    skip_dirs: &[&str],
-) -> anyhow::Result<()> {
-    eprintln!("  compiling post: {}", post.path);
-    let dest = output_dir.join("posts").join(&post.path);
-    compile_content(&post.md_path, &post.source_dir, &dest, compiler, skip_dirs, |body| {
-        render_post(tera, config, post, body, tree)
-    })
-}
-
-fn compile_page(
-    config: &Config,
-    tera: &tera::Tera,
-    page: &ContentItem,
-    output_dir: &Path,
-    compiler: &TypstCompiler,
-    tree: &ContentTree,
-    skip_dirs: &[&str],
-) -> anyhow::Result<()> {
-    eprintln!("  compiling page: {}", page.path);
-    let dest = output_dir.join(&page.path);
-    compile_content(&page.md_path, &page.source_dir, &dest, compiler, skip_dirs, |body| {
-        render_page(tera, config, page, body, tree)
-    })
 }
 
 fn copy_dir_filtered(
@@ -221,11 +321,7 @@ fn copy_dir_filtered(
     Ok(())
 }
 
-fn copy_assets(
-    source_dir: &Path,
-    dest_dir: &Path,
-    skip_dirs: &[&str],
-) -> anyhow::Result<()> {
+fn copy_assets(source_dir: &Path, dest_dir: &Path, skip_dirs: &[&str]) -> anyhow::Result<()> {
     if !source_dir.is_dir() {
         return Ok(());
     }
@@ -241,17 +337,6 @@ fn copy_assets(
         }
         true
     })
-}
-
-/// Extract the inner content from Typst's full HTML document output.
-fn extract_body(html: &str) -> String {
-    let body_start = html.find("<body>").map(|i| i + 6);
-    let body_end = html.rfind("</body>");
-
-    match (body_start, body_end) {
-        (Some(start), Some(end)) if start < end => html[start..end].trim().to_string(),
-        _ => html.to_string(),
-    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
@@ -279,10 +364,9 @@ mod tests {
     #[test]
     fn typst_compiler_handles_mermaid() {
         let c = compiler();
-        let result = c.compile("mermaid", "graph TD\n    A --> B");
-        let html = result.unwrap();
-        assert!(html.contains("<pre class=\"mermaid\">"));
-        assert!(html.contains("graph TD"));
+        let result = c.compile("mermaid", "flowchart LR\n    A --> B");
+        let svg = result.unwrap();
+        assert!(svg.contains("<svg"), "mermaid should produce SVG output");
     }
 
     #[test]

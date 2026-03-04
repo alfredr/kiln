@@ -1,6 +1,4 @@
-use crate::ast::{
-    Attrs, Declaration, Hint, Node, NodeKind, Selector, SeriesConfig, SeriesDisplay, Value,
-};
+use crate::ast::{Attrs, Declaration, Hint, Node, NodeKind, SeriesConfig, SeriesDisplay, Value};
 
 use super::inline::find_matching_delim;
 
@@ -88,7 +86,10 @@ pub(super) fn maybe_extract_trailing_attrs_from_children(children: &mut Vec<Node
         let len = children.len();
         if len >= 2 {
             let (head, _tail) = children.split_at_mut(len - 1);
-            apply_brace_attrs(&mut head.last_mut().expect("head non-empty").attrs, &attr_str);
+            apply_brace_attrs(
+                &mut head.last_mut().expect("head non-empty").attrs,
+                &attr_str,
+            );
         }
     }
 }
@@ -146,10 +147,15 @@ fn parse_attr_key_value(chars: &[char], pos: usize, attrs: &mut Attrs) -> usize 
     while p < chars.len() && chars[p] != '=' && !chars[p].is_whitespace() {
         p += 1;
     }
-    if p >= chars.len() || chars[p] != '=' {
-        return p + 1; // unknown token, skip
-    }
     let key: String = chars[key_start..p].iter().collect();
+    if key.is_empty() {
+        return p + 1;
+    }
+    if p >= chars.len() || chars[p] != '=' {
+        // Bare token without value — treat as boolean true.
+        attrs.properties.insert(key, Value::Bool(true));
+        return p;
+    }
     p += 1; // skip =
     let (value, new_pos) = parse_attr_value(chars, p);
     attrs.properties.insert(key, Value::Text(value));
@@ -193,9 +199,7 @@ fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
             }
         }
         "hint" => {
-            if let Some(hint) = parse_hint_directive(args) {
-                attrs.hints.push(hint);
-            }
+            attrs.hints.extend(parse_hint_directive(args));
         }
         _ => {}
     }
@@ -230,56 +234,120 @@ fn parse_series_directive(args: &str) -> Option<Declaration> {
     })
 }
 
-/// Parse `@hint(id_prefix("fig:"), series=figs)`
-fn parse_hint_directive(args: &str) -> Option<Hint> {
-    let parts = split_directive_args(args);
-    if parts.len() < 2 {
-        return None;
+/// Parse `@hint(figure.wide, layout="full", position="top")`.
+///
+/// The args are split into a selector portion and property assignments.
+/// The boundary is the first top-level comma-separated token that looks
+/// like a property assignment (`key=value` where key is a bare identifier).
+/// Returns one `Hint` per property, all sharing the same selector.
+fn parse_hint_directive(args: &str) -> Vec<Hint> {
+    let parts = split_top_level_hint_commas(args);
+    if parts.is_empty() {
+        return vec![];
     }
-    // First part is the selector
-    let selector = parse_selector(&parts[0].0, &parts[0].1)?;
-    // Remaining parts are property=value
-    let (property, value) = if parts.len() > 1 {
-        (parts[1].0.clone(), Value::Text(parts[1].1.clone()))
-    } else {
-        return None;
+
+    // Find the boundary: first token that is a property assignment.
+    let boundary = parts.iter().position(|p| is_property_token(p));
+
+    let (selector_str, prop_parts) = match boundary {
+        Some(idx) => {
+            let sel = parts[..idx].join(",");
+            (sel, &parts[idx..])
+        }
+        None => return vec![],
     };
-    Some(Hint {
-        selector,
-        property,
-        value,
-    })
+
+    let selector = match crate::selector::parse_selector(&selector_str) {
+        Some(s) => s,
+        None => return vec![],
+    };
+
+    let mut hints = Vec::new();
+    for prop in prop_parts {
+        let prop = prop.trim();
+        if let Some(eq) = find_top_level_eq(prop) {
+            let key = prop[..eq].trim().to_string();
+            let val_str = prop[eq + 1..].trim();
+            let value = parse_hint_value(val_str);
+            hints.push(Hint {
+                selector: selector.clone(),
+                property: key,
+                value,
+            });
+        }
+    }
+    hints
 }
 
-fn parse_selector(name: &str, arg: &str) -> Option<Selector> {
-    // Handle function-style selectors: kind(Heading), id_prefix("fig:")
-    if let Some(paren) = name.find('(') {
-        let func = &name[..paren];
-        let inner = name[paren + 1..].trim_end_matches(')');
-        let inner = inner.trim_matches('"');
-        type Ctor = (&'static str, fn(String) -> Selector);
-        const FUNCS: &[Ctor] = &[
-            ("kind", Selector::Kind),
-            ("class", Selector::Class),
-            ("id", Selector::Id),
-            ("id_prefix", Selector::IdPrefix),
-        ];
-        return FUNCS
-            .iter()
-            .find(|(name, _)| *name == func)
-            .map(|(_, ctor)| ctor(inner.to_string()));
+/// Check if a comma-separated token is a property assignment (bare identifier followed by `=`).
+fn is_property_token(token: &str) -> bool {
+    let token = token.trim();
+    if token.is_empty()
+        || token.starts_with('.')
+        || token.starts_with('#')
+        || token.starts_with('[')
+    {
+        return false;
     }
-    match name {
-        "this" => Some(Selector::This),
+    if token == "this" {
+        return false;
+    }
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+    for (i, ch) in token.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '[' | '(' if !in_quotes => depth += 1,
+            ']' | ')' if !in_quotes => depth -= 1,
+            '=' if !in_quotes && depth == 0 => {
+                let before = &token[..i];
+                return before
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Parse a hint property value string into a `Value`.
+fn parse_hint_value(s: &str) -> Value {
+    let s = s.trim().trim_matches('"');
+    match s {
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
         _ => {
-            // Try as a simple kind name
-            if !arg.is_empty() {
-                Some(Selector::Kind(name.to_string()))
+            if let Ok(n) = s.parse::<f64>() {
+                Value::Number(n)
             } else {
-                None
+                Value::Text(s.to_string())
             }
         }
     }
+}
+
+/// Split hint args on top-level commas (not inside `[...]`, `(...)`, or `"`).
+fn split_top_level_hint_commas(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0i32;
+    let mut in_quotes = false;
+
+    for (i, ch) in input.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '[' | '(' if !in_quotes => depth += 1,
+            ']' | ')' if !in_quotes => depth -= 1,
+            ',' if !in_quotes && depth == 0 => {
+                parts.push(input[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].to_string());
+    parts
 }
 
 /// Split directive args like `figs, label="Figure", display=hierarchical`

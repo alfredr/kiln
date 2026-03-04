@@ -2,8 +2,6 @@
 title: "Configuration"
 ---
 
-# Configuration
-
 kiln is configured through a single file, `kiln.toml`, placed at the root of your project. This file uses [TOML](https://toml.io/) syntax and has two sections: `[site]` for metadata and `[build]` for directory layout. Command-line flags provide additional runtime options.
 
 ## The `[site]` Section

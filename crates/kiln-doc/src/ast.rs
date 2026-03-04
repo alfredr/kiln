@@ -44,12 +44,21 @@ pub struct Node {
 #[derive(Debug, Clone)]
 pub enum NodeKind {
     // Structure
-    Section { level: u8 },
-    FileScope { source: String },
-    Heading { level: u8 },
+    Section {
+        level: u8,
+    },
+    FileScope {
+        source: String,
+    },
+    Heading {
+        level: u8,
+    },
     Paragraph,
     BlockQuote,
-    List { ordered: bool, start: Option<u64> },
+    List {
+        ordered: bool,
+        start: Option<u64>,
+    },
     ListItem,
     Table,
     TableRow,
@@ -60,9 +69,18 @@ pub enum NodeKind {
     Caption,
 
     // Leaf blocks — carry content as String
-    CodeBlock { lang: String, source: String },
-    RawBlock { format: String, source: String },
-    Math { display: bool, source: String },
+    CodeBlock {
+        lang: String,
+        source: String,
+    },
+    RawBlock {
+        format: String,
+        source: String,
+    },
+    Math {
+        display: bool,
+        source: String,
+    },
 
     // Leaf inline — carry content as String
     Text(String),
@@ -72,18 +90,31 @@ pub enum NodeKind {
     Emphasis,
     Strong,
     Strikethrough,
-    Link { url: String },
-    Image { url: String, alt: String },
-    Citation { key: String },
-    CrossRef { target: String },
+    Link {
+        url: String,
+    },
+    Image {
+        url: String,
+        alt: String,
+    },
+    Citation {
+        key: String,
+    },
+    CrossRef {
+        target: String,
+    },
     SoftBreak,
     HardBreak,
 
     // Layout
-    Space { spacing: Spacing },
+    Space {
+        spacing: Spacing,
+    },
 
     // Extensible
-    Custom { content_type: String },
+    Custom {
+        content_type: String,
+    },
 }
 
 // ── Attributes ──
@@ -105,8 +136,6 @@ pub struct Attrs {
     pub declarations: Vec<Declaration>,
     /// Scoped hints that cascade to descendants.
     pub hints: Vec<Hint>,
-    /// Resolved properties filled by the resolver.
-    pub resolved: HashMap<String, Value>,
 }
 
 impl Attrs {
@@ -119,7 +148,6 @@ impl Attrs {
             frontmatter: None,
             declarations: Vec::new(),
             hints: Vec::new(),
-            resolved: HashMap::new(),
         }
     }
 }
@@ -137,10 +165,9 @@ impl Default for Attrs {
 /// Hints cascade to all descendants. When multiple hints match the same node
 /// and set the same property, closest ancestor wins (innermost scope).
 ///
-/// The same mechanism binds figures to a series AND headings to a font:
 /// ```text
-/// hint(id_prefix("fig:"), series: "figs")
-/// hint(kind(Heading),     font_family: "Georgia")
+/// {@hint(figure, series="figs")}
+/// {@hint(heading, font_family="Georgia")}
 /// ```
 #[derive(Debug, Clone)]
 pub struct Hint {
@@ -149,19 +176,87 @@ pub struct Hint {
     pub value: Value,
 }
 
-/// What nodes a hint applies to.
+// ── Selector types ──
+
+/// Top-level selector for a hint.
 #[derive(Debug, Clone)]
 pub enum Selector {
-    /// This node only.
+    /// This node only (scoped to attachment point).
     This,
-    /// Descendants matching a node kind name (e.g. "Heading", "Figure").
-    Kind(String),
-    /// Descendants with a CSS class.
-    Class(String),
-    /// A specific element by id.
-    Id(String),
-    /// All ids starting with a prefix (e.g. "fig:" matches "fig:arch").
-    IdPrefix(String),
+    /// A CSS-like selector expression.
+    Expr(SelectorExpr),
+}
+
+/// A selector expression supporting boolean combinations and combinators.
+#[derive(Debug, Clone)]
+pub enum SelectorExpr {
+    /// A single compound selector: `figure.wide[lang="rust"]`
+    Simple(CompoundSelector),
+    /// Combinator chain: `figure > caption` or `section ~> figure`
+    Combinator {
+        left: Box<SelectorExpr>,
+        op: CombinatorOp,
+        right: Box<SelectorExpr>,
+    },
+    /// OR: comma-separated or `|` operator.
+    Or(Vec<SelectorExpr>),
+    /// AND: explicit `&` operator.
+    And(Vec<SelectorExpr>),
+}
+
+/// Relationship between two selectors in a combinator chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombinatorOp {
+    /// `>` — direct child.
+    Child,
+    /// `~>` — descendant at any depth.
+    Descendant,
+}
+
+/// A compound selector: all parts must match simultaneously (AND).
+///
+/// `heading.numbered[level=2]` → kind=Heading, classes=["numbered"], attrs=[level=2]
+#[derive(Debug, Clone, Default)]
+pub struct CompoundSelector {
+    /// Kind name in canonical PascalCase (e.g. "Heading", "CodeBlock").
+    pub kind: Option<String>,
+    /// Explicit element ID (e.g. `#intro`).
+    pub id: Option<String>,
+    /// CSS classes (e.g. `.wide .dark`).
+    pub classes: Vec<String>,
+    /// Attribute expression from `[...]` blocks (ANDed with kind/id/classes).
+    pub attr_expr: Option<AttrExpr>,
+}
+
+/// Attribute-level expression tree for `[...]` contents.
+///
+/// `[lang="rust", preview | level=2]` → `Or(And(Pred, Pred), Pred)`
+#[derive(Debug, Clone)]
+pub enum AttrExpr {
+    /// A single predicate: `[lang="rust"]` or `[preview]`.
+    Pred(AttrPred),
+    /// All must match (`,` or `&` inside brackets).
+    And(Vec<AttrExpr>),
+    /// Any must match (`|` inside brackets, or tuple distribution).
+    Or(Vec<AttrExpr>),
+}
+
+/// A single attribute predicate.
+#[derive(Debug, Clone)]
+pub struct AttrPred {
+    pub name: String,
+    pub op: AttrOp,
+}
+
+/// How an attribute predicate matches.
+#[derive(Debug, Clone)]
+pub enum AttrOp {
+    /// `[attr]` — attribute exists (any value).
+    Exists,
+    /// `[attr="val"]` — exact match.
+    Eq(String),
+    /// `[attr^="val"]` — starts with.
+    StartsWith(String),
 }
 
 // ── Declarations ──

@@ -247,16 +247,17 @@ pub fn init(name: Option<&str>) -> anyhow::Result<()> {
     };
 
     if project_dir.join("kiln.toml").exists() {
-        anyhow::bail!(
-            "kiln.toml already exists in {}",
-            project_dir.display()
-        );
+        anyhow::bail!("kiln.toml already exists in {}", project_dir.display());
     }
 
     let title = derive_title(name, &project_dir);
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    write_file(&project_dir, "kiln.toml", &KILN_TOML.replace("{{TITLE}}", &title))?;
+    write_file(
+        &project_dir,
+        "kiln.toml",
+        &KILN_TOML.replace("{{TITLE}}", &title),
+    )?;
     write_file(&project_dir, ".gitignore", GITIGNORE)?;
     write_file(&project_dir, "templates/base.html", BASE_HTML)?;
     write_file(&project_dir, "templates/post.html", POST_HTML)?;
@@ -290,9 +291,7 @@ fn derive_title(name: Option<&str>, project_dir: &Path) -> String {
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
-                Some(first) => {
-                    first.to_uppercase().to_string() + chars.as_str()
-                }
+                Some(first) => first.to_uppercase().to_string() + chars.as_str(),
                 None => String::new(),
             }
         })
@@ -305,6 +304,5 @@ fn write_file(base: &Path, relative: &str, content: &str) -> anyhow::Result<()> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, content)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
 }

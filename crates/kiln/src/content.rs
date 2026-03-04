@@ -23,7 +23,9 @@ pub enum ContentKind {
     Page(ContentItem),
     Post(ContentItem),
     /// A directory with no index.md — groups children but has no page.
-    Virtual { slug: String },
+    Virtual {
+        slug: String,
+    },
 }
 
 /// Section-level config extracted from index.md frontmatter `extra` keys.
@@ -111,9 +113,10 @@ pub fn discover_content(
 fn check_collisions(node: &ContentNode, seen: &mut HashSet<String>) -> anyhow::Result<()> {
     if !node.path.is_empty()
         && let ContentKind::Page(_) | ContentKind::Post(_) = &node.kind
-            && !seen.insert(node.path.clone()) {
-                anyhow::bail!("duplicate content path: '{}'", node.path);
-            }
+        && !seen.insert(node.path.clone())
+    {
+        anyhow::bail!("duplicate content path: '{}'", node.path);
+    }
     for child in &node.children {
         check_collisions(child, seen)?;
     }
@@ -129,8 +132,8 @@ fn discover_dir(
 ) -> anyhow::Result<Vec<ContentNode>> {
     // Determine effective slug pattern: section override > parent pattern
     let section_re;
-    let effective_pattern = if let Some(override_pat) = parent_section_config
-        .and_then(|sc| sc.slug_pattern.as_deref())
+    let effective_pattern = if let Some(override_pat) =
+        parent_section_config.and_then(|sc| sc.slug_pattern.as_deref())
     {
         section_re = Regex::new(override_pat)
             .with_context(|| format!("invalid section_slug_pattern: {override_pat}"))?;
@@ -146,21 +149,30 @@ fn discover_dir(
         let path = entry.path();
 
         if path.is_dir() {
-            nodes.extend(
-                discover_dir_entry(&path, parent_path, include_drafts, effective_pattern)?
-            );
+            nodes.extend(discover_dir_entry(
+                &path,
+                parent_path,
+                include_drafts,
+                effective_pattern,
+            )?);
             continue;
         }
         if path.extension().is_none_or(|ext| ext != "md") {
             continue;
         }
-        let file_name = path.file_stem().expect("md file has stem").to_string_lossy();
+        let file_name = path
+            .file_stem()
+            .expect("md file has stem")
+            .to_string_lossy();
         if file_name == "index" {
             continue; // handled by parent directory
         }
-        nodes.extend(
-            discover_file_entry(&path, parent_path, include_drafts, effective_pattern)?
-        );
+        nodes.extend(discover_file_entry(
+            &path,
+            parent_path,
+            include_drafts,
+            effective_pattern,
+        )?);
     }
 
     // Sort by original filename for stable ordering
@@ -180,7 +192,11 @@ fn discover_dir_entry(
     include_drafts: bool,
     slug_pattern: Option<&Regex>,
 ) -> anyhow::Result<Option<ContentNode>> {
-    let dir_name = dir.file_name().expect("dir has name").to_string_lossy().into_owned();
+    let dir_name = dir
+        .file_name()
+        .expect("dir has name")
+        .to_string_lossy()
+        .into_owned();
     let index_path = dir.join("index.md");
 
     if index_path.exists() {
@@ -199,7 +215,13 @@ fn discover_dir_entry(
         let section_config = extract_section_config(&doc.meta);
 
         // Recurse into children
-        let children = discover_dir(dir, &path, include_drafts, slug_pattern, section_config.as_ref())?;
+        let children = discover_dir(
+            dir,
+            &path,
+            include_drafts,
+            slug_pattern,
+            section_config.as_ref(),
+        )?;
 
         let item = ContentItem {
             meta: doc.meta,
@@ -235,9 +257,7 @@ fn discover_dir_entry(
         Ok(Some(ContentNode {
             path,
             slug,
-            kind: ContentKind::Virtual {
-                slug: dir_name,
-            },
+            kind: ContentKind::Virtual { slug: dir_name },
             children,
             position: 0,
         }))
@@ -250,7 +270,11 @@ fn discover_file_entry(
     include_drafts: bool,
     slug_pattern: Option<&Regex>,
 ) -> anyhow::Result<Option<ContentNode>> {
-    let file_stem = file.file_stem().expect("md file has stem").to_string_lossy().into_owned();
+    let file_stem = file
+        .file_stem()
+        .expect("md file has stem")
+        .to_string_lossy()
+        .into_owned();
     let markdown = std::fs::read_to_string(file)
         .with_context(|| format!("failed to read {}", file.display()))?;
     let doc = kiln_doc::parse::parse(&markdown)
@@ -307,19 +331,21 @@ fn derive_slug(raw_name: &str, meta: &Metadata, slug_pattern: Option<&Regex>) ->
 fn apply_slug_pattern(raw_name: &str, slug_pattern: Option<&Regex>) -> String {
     if let Some(re) = slug_pattern
         && let Some(caps) = re.captures(raw_name)
-            && let Some(m) = caps.get(1) {
-                return m.as_str().to_string();
-            }
+        && let Some(m) = caps.get(1)
+    {
+        return m.as_str().to_string();
+    }
     raw_name.to_string()
 }
 
 fn extract_section_config(meta: &Metadata) -> Option<SectionConfig> {
     if let Some(v) = meta.extra.get("section_slug_pattern")
-        && let Some(s) = v.as_str() {
-            return Some(SectionConfig {
-                slug_pattern: Some(s.to_string()),
-            });
-        }
+        && let Some(s) = v.as_str()
+    {
+        return Some(SectionConfig {
+            slug_pattern: Some(s.to_string()),
+        });
+    }
     None
 }
 
@@ -340,7 +366,11 @@ mod tests {
     fn discover_basic_post_and_page() {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
-        write_content(&content, "my-post/index.md", "---\ntitle: Post\ndate: \"2026-01-01\"\n---\nHello");
+        write_content(
+            &content,
+            "my-post/index.md",
+            "---\ntitle: Post\ndate: \"2026-01-01\"\n---\nHello",
+        );
         write_content(&content, "about/index.md", "---\ntitle: About\n---\nPage");
 
         let tree = discover_content(&content, false, None).unwrap();
@@ -354,8 +384,16 @@ mod tests {
     fn discover_drafts_excluded() {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
-        write_content(&content, "draft-post/index.md", "---\ntitle: Draft\ndate: \"2026-01-01\"\ndraft: true\n---\n");
-        write_content(&content, "published/index.md", "---\ntitle: Pub\ndate: \"2026-01-02\"\n---\n");
+        write_content(
+            &content,
+            "draft-post/index.md",
+            "---\ntitle: Draft\ndate: \"2026-01-01\"\ndraft: true\n---\n",
+        );
+        write_content(
+            &content,
+            "published/index.md",
+            "---\ntitle: Pub\ndate: \"2026-01-02\"\n---\n",
+        );
 
         let tree = discover_content(&content, false, None).unwrap();
         assert_eq!(tree.posts.len(), 1);
@@ -366,8 +404,16 @@ mod tests {
     fn discover_drafts_included() {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
-        write_content(&content, "draft-post/index.md", "---\ntitle: Draft\ndate: \"2026-01-01\"\ndraft: true\n---\n");
-        write_content(&content, "published/index.md", "---\ntitle: Pub\ndate: \"2026-01-02\"\n---\n");
+        write_content(
+            &content,
+            "draft-post/index.md",
+            "---\ntitle: Draft\ndate: \"2026-01-01\"\ndraft: true\n---\n",
+        );
+        write_content(
+            &content,
+            "published/index.md",
+            "---\ntitle: Pub\ndate: \"2026-01-02\"\n---\n",
+        );
 
         let tree = discover_content(&content, true, None).unwrap();
         assert_eq!(tree.posts.len(), 2);
@@ -393,7 +439,11 @@ mod tests {
     fn discover_slug_frontmatter_override() {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
-        write_content(&content, "ugly-name/index.md", "---\ntitle: Nice\nslug: nice-slug\n---\n");
+        write_content(
+            &content,
+            "ugly-name/index.md",
+            "---\ntitle: Nice\nslug: nice-slug\n---\n",
+        );
 
         let tree = discover_content(&content, false, None).unwrap();
         assert_eq!(tree.pages.len(), 1);
@@ -406,8 +456,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
         // Two entries that resolve to the same slug
-        write_content(&content, "hello/index.md", "---\ntitle: A\nslug: same\n---\n");
-        write_content(&content, "world/index.md", "---\ntitle: B\nslug: same\n---\n");
+        write_content(
+            &content,
+            "hello/index.md",
+            "---\ntitle: A\nslug: same\n---\n",
+        );
+        write_content(
+            &content,
+            "world/index.md",
+            "---\ntitle: B\nslug: same\n---\n",
+        );
 
         let result = discover_content(&content, false, None);
         assert!(result.is_err());
@@ -427,7 +485,10 @@ mod tests {
 
         // Root should have one virtual child
         assert_eq!(tree.root.children.len(), 1);
-        assert!(matches!(&tree.root.children[0].kind, ContentKind::Virtual { .. }));
+        assert!(matches!(
+            &tree.root.children[0].kind,
+            ContentKind::Virtual { .. }
+        ));
     }
 
     #[test]
@@ -461,9 +522,21 @@ mod tests {
     fn discover_post_sorting() {
         let tmp = tempfile::tempdir().unwrap();
         let content = tmp.path().join("content");
-        write_content(&content, "old/index.md", "---\ntitle: Old\ndate: \"2025-01-01\"\n---\n");
-        write_content(&content, "new/index.md", "---\ntitle: New\ndate: \"2026-06-01\"\n---\n");
-        write_content(&content, "mid/index.md", "---\ntitle: Mid\ndate: \"2025-06-01\"\n---\n");
+        write_content(
+            &content,
+            "old/index.md",
+            "---\ntitle: Old\ndate: \"2025-01-01\"\n---\n",
+        );
+        write_content(
+            &content,
+            "new/index.md",
+            "---\ntitle: New\ndate: \"2026-06-01\"\n---\n",
+        );
+        write_content(
+            &content,
+            "mid/index.md",
+            "---\ntitle: Mid\ndate: \"2025-06-01\"\n---\n",
+        );
 
         let tree = discover_content(&content, false, None).unwrap();
         assert_eq!(tree.posts.len(), 3);

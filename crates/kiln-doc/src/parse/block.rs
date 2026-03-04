@@ -168,19 +168,36 @@ fn try_parse_table(lines: &[&str]) -> Option<(RawBlock, usize)> {
 }
 
 /// Split a table row like `| a | b | c |` into cells `["a", "b", "c"]`.
+///
+/// Handles escaped pipes (`\|`) and pipes inside backtick code spans —
+/// neither is treated as a cell delimiter.
 fn split_table_row(line: &str) -> Vec<String> {
     let trimmed = line.trim();
     // Strip leading and trailing pipes
-    let inner = trimmed
-        .strip_prefix('|')
-        .unwrap_or(trimmed);
-    let inner = inner
-        .strip_suffix('|')
-        .unwrap_or(inner);
-    inner
-        .split('|')
-        .map(|s| s.trim().to_string())
-        .collect()
+    let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut in_code = false;
+    let mut prev_backslash = false;
+
+    for ch in inner.chars() {
+        if ch == '`' && !prev_backslash {
+            in_code = !in_code;
+            current.push(ch);
+            prev_backslash = false;
+        } else if ch == '|' && !in_code && !prev_backslash {
+            cells.push(current.trim().to_string());
+            current = String::new();
+            prev_backslash = false;
+        } else {
+            prev_backslash = ch == '\\';
+            current.push(ch);
+        }
+    }
+    cells.push(current.trim().to_string());
+    cells
 }
 
 fn try_parse_heading(line: &str) -> Option<RawBlock> {
@@ -247,10 +264,7 @@ fn try_parse_fenced_code(lines: &[&str]) -> Option<(RawBlock, usize)> {
                 .take_while(|&b| b == fence_char as u8)
                 .count()
                 >= fence_len
-            && trimmed
-                .trim_end()
-                .bytes()
-                .all(|b| b == fence_char as u8)
+            && trimmed.trim_end().bytes().all(|b| b == fence_char as u8)
         {
             i += 1;
             break;
@@ -332,9 +346,7 @@ fn try_parse_list(lines: &[&str]) -> Option<(RawBlock, usize)> {
     while i < lines.len() {
         let line = lines[i];
         let is_blank = line.trim().is_empty();
-        if is_blank
-            && !list_blank_line_continues(lines, i, base_indent, content_indent, ordered)
-        {
+        if is_blank && !list_blank_line_continues(lines, i, base_indent, content_indent, ordered) {
             break;
         }
         if is_blank {
@@ -346,12 +358,13 @@ fn try_parse_list(lines: &[&str]) -> Option<(RawBlock, usize)> {
         let line_indent = line.len() - line_trimmed.len();
         // New item at same level?
         if line_indent <= base_indent + 1
-            && let Some((_, _, me)) = detect_list_marker_compatible(line_trimmed, ordered) {
-                items.push(std::mem::take(&mut current_item));
-                current_item.push(&line_trimmed[me..]);
-                i += 1;
-                continue;
-            }
+            && let Some((_, _, me)) = detect_list_marker_compatible(line_trimmed, ordered)
+        {
+            items.push(std::mem::take(&mut current_item));
+            current_item.push(&line_trimmed[me..]);
+            i += 1;
+            continue;
+        }
         // Continuation line (indented)
         if line_indent >= content_indent {
             current_item.push(&line[content_indent..]);
@@ -405,10 +418,7 @@ fn detect_list_marker(line: &str) -> Option<(bool, u64, usize)> {
     None
 }
 
-fn detect_list_marker_compatible(
-    line: &str,
-    ordered: bool,
-) -> Option<(bool, u64, usize)> {
+fn detect_list_marker_compatible(line: &str, ordered: bool) -> Option<(bool, u64, usize)> {
     let result = detect_list_marker(line)?;
     if result.0 == ordered {
         Some(result)
