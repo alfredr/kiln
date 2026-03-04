@@ -563,7 +563,7 @@ mod tests {
             vec![
                 ("flag", toml::Value::Boolean(false)),
                 ("count", toml::Value::Integer(42)),
-                ("ratio", toml::Value::Float(3.14)),
+                ("ratio", toml::Value::Float(1.23)),
                 ("label", toml::Value::String("hello".into())),
             ],
         );
@@ -573,7 +573,7 @@ mod tests {
         let find = |name: &str| hints.iter().find(|h| h.property == name).unwrap();
         assert!(matches!(&find("flag").value, Value::Bool(false)));
         assert!(matches!(&find("count").value, Value::Number(n) if *n == 42.0));
-        assert!(matches!(&find("ratio").value, Value::Number(n) if (*n - 3.14).abs() < 0.001));
+        assert!(matches!(&find("ratio").value, Value::Number(n) if (*n - 1.23).abs() < 0.001));
         assert!(matches!(&find("label").value, Value::Text(s) if s == "hello"));
     }
 

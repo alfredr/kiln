@@ -191,6 +191,15 @@ This produces:
 #emph[This block] has an ID and a class applied to its output element.
 ```
 
+You can also use the colon shorthand to attach an ID directly to the format marker:
+
+````
+```{=typst:#fig:summary .wide}
+```
+````
+
+This is equivalent to `{=typst #fig:summary .wide}`.
+
 These attributes are applied to the output element, allowing you to target specific raw blocks with CSS or reference them with anchor links.
 
 ## The `RawBlockCompiler` Trait

@@ -29,10 +29,10 @@ This renders with the specified ID and class on the heading element. Use this to
 
 ### On Code Blocks
 
-Place the attribute block after the language identifier on the opening fence:
+Place the language and attributes together inside braces on the opening fence:
 
 ````markdown
-```rust {#lst:fibonacci caption="Fibonacci sequence"}
+```{rust #lst:fibonacci caption="Fibonacci sequence"}
 fn fib(n: u32) -> u32 {
     match n {
         0 => 0,
@@ -43,7 +43,9 @@ fn fib(n: u32) -> u32 {
 ```
 ````
 
-The `caption` attribute is particularly useful for code listings that you want to reference elsewhere in the document (see cross-references below).
+The first bare word inside the braces is the language (for syntax highlighting). The `caption` attribute is particularly useful for code listings that you want to reference elsewhere in the document (see cross-references below).
+
+A bare language without braces (`` ```rust ``) also works and is normalized to `{rust}` internally.
 
 ### On Paragraphs
 

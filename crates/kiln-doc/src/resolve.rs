@@ -188,6 +188,13 @@ mod tests {
     use crate::ast::{CompoundSelector, SelectorExpr, Value, reset_id_counter};
     use crate::parse::parse;
 
+    fn find_node(node: &Node, pred: fn(&Node) -> bool) -> Option<&Node> {
+        if pred(node) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| find_node(c, pred))
+    }
+
     #[test]
     fn hoist_removes_directive_nodes() {
         reset_id_counter();
@@ -264,13 +271,8 @@ mod tests {
             parse("{@hint(#sec-intro, highlight=true)}\n\n# Introduction {#sec-intro}").unwrap();
         resolve_document(&mut doc);
 
-        fn find_heading(node: &Node) -> Option<&Node> {
-            if matches!(node.kind, NodeKind::Heading { .. }) {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_heading)
-        }
-        let heading = find_heading(&doc.content).expect("should have a heading");
+        let heading = find_node(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }))
+            .expect("should have a heading");
         assert_eq!(heading.attrs.id, "sec-intro");
         assert!(heading.attrs.properties.contains_key("highlight"));
     }
@@ -296,15 +298,10 @@ mod tests {
         .unwrap();
         resolve_document(&mut doc);
 
-        // Find the code block (nested inside section).
-        fn find_code_block(node: &Node) -> Option<&Node> {
-            if matches!(node.kind, NodeKind::CodeBlock { .. }) {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_code_block)
-        }
-
-        let code = find_code_block(&doc.content).expect("should have code block");
+        let code = find_node(&doc.content, |n| {
+            matches!(n.kind, NodeKind::CodeBlock { .. })
+        })
+        .expect("should have code block");
         let theme = code
             .attrs
             .properties
@@ -329,13 +326,10 @@ mod tests {
         });
         resolve_document(&mut doc);
 
-        fn find_code(node: &Node) -> Option<&Node> {
-            if matches!(node.kind, NodeKind::CodeBlock { .. }) {
-                return Some(node);
-            }
-            node.children.iter().find_map(find_code)
-        }
-        let code = find_code(&doc.content).expect("should have a code block");
+        let code = find_node(&doc.content, |n| {
+            matches!(n.kind, NodeKind::CodeBlock { .. })
+        })
+        .expect("should have a code block");
         assert!(
             code.attrs.properties.contains_key("preview"),
             "injected hint should cascade to nested code block, properties: {:?}",

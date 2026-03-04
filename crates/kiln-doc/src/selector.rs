@@ -1276,12 +1276,20 @@ mod tests {
 
         // Parent must match Or expression
         let sel = parse_selector("figure > caption").unwrap();
-        assert!(matches_selector(&sel, &child, &[parent.clone()]));
+        assert!(matches_selector(
+            &sel,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
 
         // Combinator in ancestor context returns false
         let sel2 = parse_selector("section ~> figure > caption").unwrap();
         // This tests multi-level combinator (nested combinator in snapshot = false)
-        assert!(!matches_selector(&sel2, &child, &[parent]));
+        assert!(!matches_selector(
+            &sel2,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
     }
 
     #[test]
@@ -1297,19 +1305,35 @@ mod tests {
 
         // Kind + class
         let sel = parse_selector("figure.wide > caption").unwrap();
-        assert!(matches_selector(&sel, &child, &[parent.clone()]));
+        assert!(matches_selector(
+            &sel,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
 
         // Kind + wrong class
         let sel2 = parse_selector("figure.narrow > caption").unwrap();
-        assert!(!matches_selector(&sel2, &child, &[parent.clone()]));
+        assert!(!matches_selector(
+            &sel2,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
 
         // Kind + id
         let sel3 = parse_selector("figure#fig1 > caption").unwrap();
-        assert!(matches_selector(&sel3, &child, &[parent.clone()]));
+        assert!(matches_selector(
+            &sel3,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
 
         // Kind + wrong id
         let sel4 = parse_selector("figure#fig2 > caption").unwrap();
-        assert!(!matches_selector(&sel4, &child, &[parent.clone()]));
+        assert!(!matches_selector(
+            &sel4,
+            &child,
+            std::slice::from_ref(&parent)
+        ));
 
         // Auto-id should not match
         let auto_parent = NodeSnapshot {

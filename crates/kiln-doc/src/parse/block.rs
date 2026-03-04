@@ -10,7 +10,6 @@ pub(super) enum RawBlock {
     },
     Paragraph(String),
     CodeBlock {
-        lang: String,
         source: String,
         attrs: Option<String>,
     },
@@ -240,14 +239,22 @@ fn try_parse_fenced_code(lines: &[&str]) -> Option<(RawBlock, usize)> {
         return None;
     }
     let info_string = first[fence_len..].trim();
-    // Parse lang and optional brace attrs from info string
-    let (lang, attrs) = if let Some(brace_start) = info_string.find('{') {
-        let lang = info_string[..brace_start].trim();
+    // Normalize info string into a single attrs value.
+    // All forms collapse into attrs: `rust {#id}` → "rust #id",
+    // `{=typst}` → "=typst", bare `rust` → "rust", empty → None.
+    let attrs = if let Some(brace_start) = info_string.find('{') {
+        let prefix = info_string[..brace_start].trim();
         let brace_end = info_string.rfind('}')?;
-        let attrs = &info_string[brace_start + 1..brace_end];
-        (lang.to_string(), Some(attrs.to_string()))
+        let brace_content = &info_string[brace_start + 1..brace_end];
+        Some(if prefix.is_empty() {
+            brace_content.to_string()
+        } else {
+            format!("{prefix} {brace_content}")
+        })
+    } else if info_string.is_empty() {
+        None
     } else {
-        (info_string.to_string(), None)
+        Some(info_string.to_string())
     };
 
     // Collect lines until closing fence
@@ -275,14 +282,7 @@ fn try_parse_fenced_code(lines: &[&str]) -> Option<(RawBlock, usize)> {
         source.push_str(line);
         i += 1;
     }
-    Some((
-        RawBlock::CodeBlock {
-            lang,
-            source,
-            attrs,
-        },
-        i,
-    ))
+    Some((RawBlock::CodeBlock { source, attrs }, i))
 }
 
 fn parse_block_quote(lines: &[&str]) -> (RawBlock, usize) {

@@ -6,8 +6,8 @@ mod section;
 use crate::ast::{Document, Metadata, Node, NodeKind};
 
 use attrs::{
-    apply_brace_attrs, extract_raw_format, maybe_extract_trailing_attrs_from_children,
-    parse_directive_to_node,
+    apply_brace_attrs, extract_lang, extract_raw_format,
+    maybe_extract_trailing_attrs_from_children, parse_directive_to_node,
 };
 use block::{RawBlock, parse_blocks};
 use inline::parse_inline;
@@ -155,19 +155,19 @@ fn parse_inlines_in_blocks(blocks: Vec<RawBlock>) -> Vec<Node> {
                 maybe_extract_trailing_attrs_from_children(&mut children);
                 Some(Node::paragraph(children))
             }
-            RawBlock::CodeBlock {
-                lang,
-                source,
-                attrs,
-            } => {
-                let (raw_format, remaining_attrs) = extract_raw_format(attrs.as_deref());
-                let mut node = if let Some(format) = raw_format {
-                    Node::raw_block(&format, source)
+            RawBlock::CodeBlock { source, attrs } => {
+                let (raw_format, rest) = extract_raw_format(attrs.as_deref());
+                let (mut node, rest) = if let Some(format) = raw_format {
+                    (Node::raw_block(&format, source), rest)
                 } else {
-                    Node::code_block(&lang, source)
+                    let (lang, rest) = extract_lang(rest.as_deref());
+                    (
+                        Node::code_block(lang.as_deref().unwrap_or(""), source),
+                        rest,
+                    )
                 };
-                if let Some(attr_str) = remaining_attrs {
-                    apply_brace_attrs(&mut node.attrs, &attr_str);
+                if let Some(a) = rest {
+                    apply_brace_attrs(&mut node.attrs, &a);
                 }
                 Some(node)
             }
@@ -448,8 +448,9 @@ mod tests {
 
     #[test]
     fn code_block_with_attrs() {
-        let doc = parse_ok("```rust {#lst:hello caption=\"Hello world\"}\nfn main() {}\n```");
+        let doc = parse_ok("```{rust #lst:hello caption=\"Hello world\"}\nfn main() {}\n```");
         let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
         assert_eq!(code.attrs.id, "lst:hello");
         assert!(code.attrs.properties.contains_key("caption"));
     }
@@ -816,8 +817,9 @@ mod tests {
 
     #[test]
     fn code_block_key_value_attrs() {
-        let doc = parse_ok("```rust {width=\"80%\"}\ncode\n```");
+        let doc = parse_ok("```{rust width=\"80%\"}\ncode\n```");
         let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
         assert!(code.attrs.properties.contains_key("width"));
     }
 
@@ -987,12 +989,11 @@ mod tests {
         use crate::ast::Selector;
         let doc = parse_ok("# Title {@hint(this, color=red)}");
         fn find_hint(node: &Node) -> Option<&crate::ast::Hint> {
-            for h in &node.attrs.hints {
-                if matches!(h.selector, Selector::This) {
-                    return Some(h);
-                }
-            }
-            node.children.iter().find_map(find_hint)
+            node.attrs
+                .hints
+                .iter()
+                .find(|h| matches!(h.selector, Selector::This))
+                .or_else(|| node.children.iter().find_map(find_hint))
         }
         let hint = find_hint(&doc.content).expect("should find this hint");
         assert_eq!(hint.property, "color");
@@ -1015,19 +1016,132 @@ mod tests {
     fn series_display_hierarchical() {
         use crate::ast::{Declaration, SeriesDisplay};
         let doc = parse_ok("{@series(eq, display=hierarchical)}");
-        let has = doc.content.children.iter().any(|n| {
-            n.attrs.declarations.iter().any(|d| {
-                matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Hierarchical))
-            })
-        });
+        let is_hierarchical = |d: &Declaration| matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Hierarchical));
+        let has = doc
+            .content
+            .children
+            .iter()
+            .any(|n| n.attrs.declarations.iter().any(is_hierarchical));
         assert!(has);
     }
 
     #[test]
     fn brace_attrs_key_value_bare() {
         // Unquoted value
-        let doc = parse_ok("```html {width=80%}\ncode\n```");
+        let doc = parse_ok("```{html width=80%}\ncode\n```");
         let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "html"));
         assert!(code.attrs.properties.contains_key("width"));
+    }
+
+    #[test]
+    fn code_block_old_form_normalizes() {
+        // Old `lang {attrs}` form normalizes to unified brace form
+        let doc = parse_ok("```rust {#my-id}\ncode\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
+        assert_eq!(code.attrs.id, "my-id");
+    }
+
+    #[test]
+    fn code_block_bare_lang() {
+        // Bare lang without braces still works
+        let doc = parse_ok("```python\nprint('hi')\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "python"));
+    }
+
+    #[test]
+    fn code_block_brace_lang_only() {
+        // {lang} form with no extra attrs
+        let doc = parse_ok("```{rust}\nfn main() {}\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
+    }
+
+    #[test]
+    fn raw_block_colon_shorthand() {
+        // {=typst:#id} colon shorthand
+        let doc = parse_ok("```{=typst:#fig:x}\n#rect()\n```");
+        let node = &doc.content.children[0];
+        assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
+        assert_eq!(node.attrs.id, "fig:x");
+    }
+
+    #[test]
+    fn raw_block_colon_shorthand_with_class() {
+        let doc = parse_ok("```{=typst:#fig:x .wide}\n#rect()\n```");
+        let node = &doc.content.children[0];
+        assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
+        assert_eq!(node.attrs.id, "fig:x");
+        assert!(node.attrs.classes.contains(&"wide".to_string()));
+    }
+
+    #[test]
+    fn code_block_no_lang() {
+        let doc = parse_ok("```\nplain text\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang.is_empty()));
+    }
+
+    #[test]
+    fn code_block_attrs_only_no_lang() {
+        // {#id .class} with no language word
+        let doc = parse_ok("```{#my-id .highlight}\ncode\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang.is_empty()));
+        assert_eq!(code.attrs.id, "my-id");
+        assert!(code.attrs.classes.contains(&"highlight".to_string()));
+    }
+
+    #[test]
+    fn code_block_bare_boolean_attr() {
+        use crate::ast::Value;
+        let doc = parse_ok("```{rust nowrap}\ncode\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
+        assert!(matches!(
+            code.attrs.properties.get("nowrap"),
+            Some(Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn raw_block_colon_empty_remainder() {
+        // {=typst:} — colon with nothing after it
+        let doc = parse_ok("```{=typst:}\n#rect()\n```");
+        let node = &doc.content.children[0];
+        assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
+    }
+
+    #[test]
+    fn heading_level_too_deep() {
+        // ####### (7 hashes) should not be a heading
+        let doc = parse_ok("####### not a heading");
+        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
+    }
+
+    #[test]
+    fn two_backticks_not_a_fence() {
+        // `` is not a valid fence (need 3+)
+        let doc = parse_ok("``not a fence``");
+        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
+    }
+
+    #[test]
+    fn code_block_with_multiple_attrs() {
+        use crate::ast::Value;
+        let doc = parse_ok("```{rust #lst:main .wide caption=\"Main\" nowrap}\nfn main() {}\n```");
+        let code = &doc.content.children[0];
+        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
+        assert_eq!(code.attrs.id, "lst:main");
+        assert!(code.attrs.classes.contains(&"wide".to_string()));
+        assert!(
+            matches!(code.attrs.properties.get("caption"), Some(Value::Text(s)) if s == "Main")
+        );
+        assert!(matches!(
+            code.attrs.properties.get("nowrap"),
+            Some(Value::Bool(true))
+        ));
     }
 }

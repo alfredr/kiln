@@ -19,6 +19,8 @@ pub(super) fn extract_trailing_brace_attrs(text: &str) -> (&str, Option<String>)
 }
 
 /// Extract a `=format` token from brace attributes (e.g. `{=html}` or `{=typst #id .class}`).
+/// Also handles the colon shorthand `{=typst:#id}` — splits at the first `:` to separate
+/// format from trailing attrs.
 /// Returns `(Some(format), remaining_attrs)` if found, `(None, original_attrs)` otherwise.
 pub(super) fn extract_raw_format(attrs: Option<&str>) -> (Option<String>, Option<String>) {
     let attrs = match attrs {
@@ -26,15 +28,16 @@ pub(super) fn extract_raw_format(attrs: Option<&str>) -> (Option<String>, Option
         None => return (None, None),
     };
 
-    // Look for =word token
     let mut result_format = None;
     let mut remaining_parts = Vec::new();
 
     for token in attrs.split_whitespace() {
         if result_format.is_none() && token.starts_with('=') && token.len() > 1 {
-            result_format = Some(token[1..].to_string());
+            let (fmt, colon_rest) = split_format_token(&token[1..]);
+            result_format = Some(fmt);
+            remaining_parts.extend(colon_rest);
         } else {
-            remaining_parts.push(token);
+            remaining_parts.push(token.to_string());
         }
     }
 
@@ -45,6 +48,58 @@ pub(super) fn extract_raw_format(attrs: Option<&str>) -> (Option<String>, Option
     };
 
     (result_format, remaining)
+}
+
+/// Split a format token at the first `:` for the colon shorthand.
+/// `"typst:#id"` → `("typst", Some("#id"))`, `"html"` → `("html", None)`.
+fn split_format_token(value: &str) -> (String, Option<String>) {
+    let Some(colon) = value.find(':') else {
+        return (value.to_string(), None);
+    };
+    let format = value[..colon].to_string();
+    let after = &value[colon + 1..];
+    let rest = if after.is_empty() {
+        None
+    } else {
+        Some(after.to_string())
+    };
+    (format, rest)
+}
+
+/// Extract a language token from brace attributes.
+/// The language is the first bare word that isn't `#id`, `.class`, `@directive`,
+/// `=format`, or `key=value`.
+/// Returns `(Some(lang), remaining_attrs)` or `(None, original_attrs)`.
+pub(super) fn extract_lang(attrs: Option<&str>) -> (Option<String>, Option<String>) {
+    let attrs = match attrs {
+        Some(a) if !a.trim().is_empty() => a.trim(),
+        _ => return (None, None),
+    };
+
+    let mut lang = None;
+    let mut remaining = Vec::new();
+
+    for token in attrs.split_whitespace() {
+        if lang.is_none()
+            && !token.starts_with('#')
+            && !token.starts_with('.')
+            && !token.starts_with('@')
+            && !token.starts_with('=')
+            && !token.contains('=')
+        {
+            lang = Some(token.to_string());
+        } else {
+            remaining.push(token);
+        }
+    }
+
+    let rest = if remaining.is_empty() {
+        None
+    } else {
+        Some(remaining.join(" "))
+    };
+
+    (lang, rest)
 }
 
 pub(super) fn apply_brace_attrs(attrs: &mut Attrs, content: &str) {
