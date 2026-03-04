@@ -875,4 +875,159 @@ mod tests {
         assert!(msg.contains("directive"));
         assert!(msg.contains("line 5"));
     }
+
+    #[test]
+    fn hint_multiple_properties() {
+        let doc = parse_ok("{@hint(figure, layout=full, position=top)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 2, "should produce 2 hints for 2 properties");
+    }
+
+    #[test]
+    fn hint_with_compound_selector() {
+        let doc = parse_ok("{@hint(code-block.wide, theme=dark)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "theme");
+    }
+
+    #[test]
+    fn hint_quoted_value() {
+        use crate::ast::Value;
+        let doc = parse_ok("{@hint(figure, label=\"Figure\")}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(matches!(&hints[0].value, Value::Text(s) if s == "Figure"));
+    }
+
+    #[test]
+    fn hint_bool_value() {
+        use crate::ast::Value;
+        let doc = parse_ok("{@hint(heading, numbering=true)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(matches!(&hints[0].value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn hint_false_bool_value() {
+        use crate::ast::Value;
+        let doc = parse_ok("{@hint(heading, numbering=false)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(matches!(&hints[0].value, Value::Bool(false)));
+    }
+
+    #[test]
+    fn hint_number_value() {
+        use crate::ast::Value;
+        let doc = parse_ok("{@hint(heading, indent=4)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert!(matches!(&hints[0].value, Value::Number(n) if *n == 4.0));
+    }
+
+    #[test]
+    fn hint_no_properties_produces_empty() {
+        // Only selector, no key=value → no hints produced
+        let doc = parse_ok("{@hint(figure)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn hint_invalid_selector_produces_empty() {
+        let doc = parse_ok("{@hint(nonexistent, x=1)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn hint_this_selector() {
+        use crate::ast::Selector;
+        let doc = parse_ok("# Title {@hint(this, color=red)}");
+        fn find_hint(node: &Node) -> Option<&crate::ast::Hint> {
+            for h in &node.attrs.hints {
+                if matches!(h.selector, Selector::This) {
+                    return Some(h);
+                }
+            }
+            node.children.iter().find_map(find_hint)
+        }
+        let hint = find_hint(&doc.content).expect("should find this hint");
+        assert_eq!(hint.property, "color");
+    }
+
+    #[test]
+    fn hint_or_selector() {
+        let doc = parse_ok("{@hint(figure, code-block, theme=dark)}");
+        let hints: Vec<_> = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| n.attrs.hints.iter())
+            .collect();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "theme");
+    }
+
+    #[test]
+    fn series_display_hierarchical() {
+        use crate::ast::{Declaration, SeriesDisplay};
+        let doc = parse_ok("{@series(eq, display=hierarchical)}");
+        let has = doc.content.children.iter().any(|n| {
+            n.attrs.declarations.iter().any(|d| {
+                matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Hierarchical))
+            })
+        });
+        assert!(has);
+    }
+
+    #[test]
+    fn brace_attrs_key_value_bare() {
+        // Unquoted value
+        let doc = parse_ok("```html {width=80%}\ncode\n```");
+        let code = &doc.content.children[0];
+        assert!(code.attrs.properties.contains_key("width"));
+    }
 }

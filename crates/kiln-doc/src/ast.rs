@@ -213,6 +213,16 @@ pub enum CombinatorOp {
     Descendant,
 }
 
+impl CombinatorOp {
+    /// Length of the combinator token in bytes.
+    pub fn token_len(self) -> usize {
+        match self {
+            Self::Child => 1,
+            Self::Descendant => 2,
+        }
+    }
+}
+
 /// A compound selector: all parts must match simultaneously (AND).
 ///
 /// `heading.numbered[level=2]` → kind=Heading, classes=["numbered"], attrs=[level=2]

@@ -144,18 +144,16 @@ impl Pass for CompileBlocks<'_> {
 }
 
 fn compile_blocks(node: &mut Node, compiler: &dyn RawBlockCompiler) {
-    match &node.kind {
-        NodeKind::RawBlock { format, source } => {
-            let format = get_compile_format(&node.attrs, format);
-            let source = source.clone();
-            store_compiled(node, compiler, &format, &source);
-        }
+    let compile_target = match &node.kind {
+        NodeKind::RawBlock { format, source } => Some((format.clone(), source.clone())),
         NodeKind::CodeBlock { lang, source } if node.attrs.properties.contains_key("preview") => {
-            let format = get_compile_format(&node.attrs, lang);
-            let source = source.clone();
-            store_compiled(node, compiler, &format, &source);
+            Some((lang.clone(), source.clone()))
         }
-        _ => {}
+        _ => None,
+    };
+    if let Some((default_fmt, source)) = compile_target {
+        let format = get_compile_format(&node.attrs, &default_fmt);
+        store_compiled(node, compiler, &format, &source);
     }
 
     for child in &mut node.children {
@@ -164,18 +162,13 @@ fn compile_blocks(node: &mut Node, compiler: &dyn RawBlockCompiler) {
 }
 
 fn store_compiled(node: &mut Node, compiler: &dyn RawBlockCompiler, format: &str, source: &str) {
-    match compiler.compile(format, source) {
-        Ok(html) => {
-            node.attrs
-                .properties
-                .insert("compiled".to_string(), Value::Text(html));
-        }
-        Err(e) => {
-            node.attrs
-                .properties
-                .insert("compile_error".to_string(), Value::Text(e));
-        }
-    }
+    let (key, val) = match compiler.compile(format, source) {
+        Ok(html) => ("compiled", html),
+        Err(e) => ("compile_error", e),
+    };
+    node.attrs
+        .properties
+        .insert(key.to_string(), Value::Text(val));
 }
 
 /// Determine the compilation format from the `preview` property, falling back to

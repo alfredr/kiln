@@ -215,6 +215,7 @@ fn config_hints(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Hin
                         toml::Value::Boolean(b) => Value::Bool(*b),
                         toml::Value::Integer(n) => Value::Number(*n as f64),
                         toml::Value::Float(n) => Value::Number(*n),
+                        toml::Value::String(s) => Value::Text(s.clone()),
                         other => Value::Text(other.to_string()),
                     },
                 })
@@ -448,5 +449,151 @@ mod tests {
     fn copy_assets_empty_source() {
         let result = copy_assets(Path::new("/nonexistent"), Path::new("/tmp"), &[]);
         assert!(result.is_ok());
+    }
+
+    // ── config_hints / parse_config_selector tests ──
+
+    fn make_hint_config(
+        selector: Option<&str>,
+        kind: Option<&str>,
+        class: Option<&str>,
+        id: Option<&str>,
+        props: Vec<(&str, toml::Value)>,
+    ) -> crate::config::HintConfig {
+        crate::config::HintConfig {
+            selector: selector.map(String::from),
+            kind: kind.map(String::from),
+            class: class.map(String::from),
+            id: id.map(String::from),
+            properties: props.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn config_selector_field() {
+        let cfg = make_hint_config(
+            Some("code-block[lang=\"rust\"]"),
+            None,
+            None,
+            None,
+            vec![("theme", toml::Value::String("dark".into()))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "theme");
+    }
+
+    #[test]
+    fn config_kind_field() {
+        let cfg = make_hint_config(
+            None,
+            Some("heading"),
+            None,
+            None,
+            vec![("numbering", toml::Value::Boolean(true))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "numbering");
+        assert!(matches!(&hints[0].value, kiln_doc::ast::Value::Bool(true)));
+    }
+
+    #[test]
+    fn config_class_field() {
+        let cfg = make_hint_config(
+            None,
+            None,
+            Some("wide"),
+            None,
+            vec![("layout", toml::Value::String("full".into()))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "layout");
+    }
+
+    #[test]
+    fn config_id_field() {
+        let cfg = make_hint_config(
+            None,
+            None,
+            None,
+            Some("fig-main"),
+            vec![("position", toml::Value::String("top".into()))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "position");
+    }
+
+    #[test]
+    fn config_no_selector_produces_empty() {
+        let cfg = make_hint_config(
+            None,
+            None,
+            None,
+            None,
+            vec![("x", toml::Value::String("y".into()))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn config_invalid_selector_produces_empty() {
+        let cfg = make_hint_config(
+            Some("nonexistent_kind"),
+            None,
+            None,
+            None,
+            vec![("x", toml::Value::String("y".into()))],
+        );
+        let hints = config_hints(&[cfg]);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn config_value_types() {
+        use kiln_doc::ast::Value;
+        let cfg = make_hint_config(
+            Some("heading"),
+            None,
+            None,
+            None,
+            vec![
+                ("flag", toml::Value::Boolean(false)),
+                ("count", toml::Value::Integer(42)),
+                ("ratio", toml::Value::Float(3.14)),
+                ("label", toml::Value::String("hello".into())),
+            ],
+        );
+        let hints = config_hints(&[cfg]);
+        assert_eq!(hints.len(), 4);
+
+        let find = |name: &str| hints.iter().find(|h| h.property == name).unwrap();
+        assert!(matches!(&find("flag").value, Value::Bool(false)));
+        assert!(matches!(&find("count").value, Value::Number(n) if *n == 42.0));
+        assert!(matches!(&find("ratio").value, Value::Number(n) if (*n - 3.14).abs() < 0.001));
+        assert!(matches!(&find("label").value, Value::Text(s) if s == "hello"));
+    }
+
+    #[test]
+    fn config_multiple_hints() {
+        let cfg1 = make_hint_config(
+            Some("heading"),
+            None,
+            None,
+            None,
+            vec![("a", toml::Value::Boolean(true))],
+        );
+        let cfg2 = make_hint_config(
+            Some("paragraph"),
+            None,
+            None,
+            None,
+            vec![("b", toml::Value::Boolean(true))],
+        );
+        let hints = config_hints(&[cfg1, cfg2]);
+        assert_eq!(hints.len(), 2);
     }
 }
