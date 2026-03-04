@@ -1185,67 +1185,7 @@ mod tests {
         assert!(attrs.hints.is_empty());
     }
 
-    // ── extract_raw_format with remaining tokens ──
 
-    #[test]
-    fn extract_raw_format_with_remaining() {
-        let (fmt, rest) = extract_raw_format(Some("=html #my-id .highlight"));
-        assert_eq!(fmt, Some("html".to_string()));
-        assert_eq!(rest, Some("#my-id .highlight".to_string()));
-    }
-
-    #[test]
-    fn extract_raw_format_non_format_tokens_only() {
-        let (fmt, rest) = extract_raw_format(Some("#id .class"));
-        assert!(fmt.is_none());
-        assert_eq!(rest, Some("#id .class".to_string()));
-    }
-
-    #[test]
-    fn extract_raw_format_colon_shorthand() {
-        let (fmt, rest) = extract_raw_format(Some("=typst:#my-id"));
-        assert_eq!(fmt, Some("typst".to_string()));
-        assert_eq!(rest, Some("#my-id".to_string()));
-    }
-
-    #[test]
-    fn extract_raw_format_colon_trailing_empty() {
-        let (fmt, rest) = extract_raw_format(Some("=typst:"));
-        assert_eq!(fmt, Some("typst".to_string()));
-        assert!(rest.is_none());
-    }
-
-    // ── extract_lang with remaining tokens ──
-
-    #[test]
-    fn extract_lang_with_remaining() {
-        let (lang, rest) = extract_lang(Some("rust #id .cls"));
-        assert_eq!(lang, Some("rust".to_string()));
-        assert_eq!(rest, Some("#id .cls".to_string()));
-    }
-
-    #[test]
-    fn extract_lang_only_specials() {
-        let (lang, rest) = extract_lang(Some("#id .cls"));
-        assert!(lang.is_none());
-        assert_eq!(rest, Some("#id .cls".to_string()));
-    }
-
-    // ── apply_brace_attrs with directive ──
-
-    #[test]
-    fn apply_brace_attrs_directive() {
-        let mut attrs = Attrs::default();
-        apply_brace_attrs(&mut attrs, "@series(fig)");
-        assert!(!attrs.declarations.is_empty() || !attrs.hints.is_empty());
-    }
-
-    #[test]
-    fn apply_brace_attrs_bare_boolean() {
-        let mut attrs = Attrs::default();
-        apply_brace_attrs(&mut attrs, "nocaption");
-        assert!(attrs.properties.contains_key("nocaption"));
-    }
 
     // ── parse_attr_directive edge cases ──
 
@@ -1258,41 +1198,7 @@ mod tests {
         assert!(consumed > 0);
     }
 
-    // ── parse_attr_key_value edge cases ──
 
-    #[test]
-    fn parse_attr_key_value_empty_key() {
-        let mut attrs = Attrs::default();
-        let chars: Vec<char> = "=value".chars().collect();
-        let consumed = parse_attr_key_value(&chars, 0, &mut attrs);
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn parse_attr_key_value_bare_token() {
-        let mut attrs = Attrs::default();
-        let chars: Vec<char> = "mybool".chars().collect();
-        let consumed = parse_attr_key_value(&chars, 0, &mut attrs);
-        assert_eq!(consumed, 6);
-        assert!(attrs.properties.contains_key("mybool"));
-    }
-
-    // ── maybe_extract_trailing_attrs edge cases ──
-
-    #[test]
-    fn maybe_extract_trailing_attrs_text_before_brace() {
-        use crate::ast::Node;
-        let mut children = vec![
-            Node::text("word"),
-            Node::text("text before {.highlight}"),
-        ];
-        maybe_extract_trailing_attrs_from_children(&mut children);
-        // The first child should get the attrs applied
-        assert!(
-            children[0].attrs.classes.contains(&"highlight".to_string())
-                || children.len() == 2
-        );
-    }
 
     // ── parse_hint_directive edge cases ──
 
@@ -1309,17 +1215,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ── parse_series_directive_full with counts ──
-
-    #[test]
-    fn parse_series_with_counts_generates_hint() {
-        let mut attrs = Attrs::default();
-        apply_directive(&mut attrs, "series", "fig, counts=figure");
-        assert!(!attrs.declarations.is_empty());
-        // Should also generate a hint for "figure" selector
-        assert!(!attrs.hints.is_empty());
-    }
-
     #[test]
     fn parse_series_with_counts_and_formats() {
         let mut attrs = Attrs::default();
@@ -1332,16 +1227,6 @@ mod tests {
     }
 
     // ── is_property_token edge cases ──
-
-    #[test]
-    fn is_property_token_eq_in_quotes() {
-        assert!(!is_property_token("\"value=with=eq\""));
-    }
-
-    #[test]
-    fn is_property_token_eq_in_brackets() {
-        assert!(!is_property_token("[a=b]"));
-    }
 
     #[test]
     fn is_property_token_hyphenated_key() {

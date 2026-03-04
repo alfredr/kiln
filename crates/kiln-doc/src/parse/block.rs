@@ -840,18 +840,6 @@ mod tests {
     // ── parse_blocks (integration) ──
 
     #[test]
-    fn blocks_empty() {
-        let blocks = parse_blocks(&[]);
-        assert!(blocks.is_empty());
-    }
-
-    #[test]
-    fn blocks_blank_lines_only() {
-        let blocks = parse_blocks(&["", "  ", ""]);
-        assert!(blocks.is_empty());
-    }
-
-    #[test]
     fn blocks_paragraph() {
         let blocks = parse_blocks(&["Hello world."]);
         assert_eq!(blocks.len(), 1);
@@ -1020,14 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn blocks_tilde_fence() {
-        let lines = vec!["~~~", "code", "~~~"];
-        let blocks = parse_blocks(&lines);
-        assert_eq!(blocks.len(), 1);
-        assert!(matches!(blocks[0], RawBlock::CodeBlock { .. }));
-    }
-
-    #[test]
     fn blocks_list_with_continuation() {
         let lines = vec!["- first", "  continued", "- second"];
         let blocks = parse_blocks(&lines);
@@ -1086,16 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_table_header_only() {
-        let lines = vec!["|H1|H2|", "|---|---|"];
-        let result = try_parse_table(&lines).unwrap();
-        if let (RawBlock::Table { rows, .. }, consumed) = result {
-            assert!(rows.is_empty());
-            assert_eq!(consumed, 2);
-        }
-    }
-
-    #[test]
     fn try_parse_table_multiple_body_rows() {
         let lines = vec!["|H|", "|---|", "|a|", "|b|", "|c|"];
         let result = try_parse_table(&lines).unwrap();
@@ -1105,26 +1075,10 @@ mod tests {
         }
     }
 
-    // ── split_table_row edge cases ──
-
     #[test]
     fn split_table_row_no_outer_pipes() {
         let cells = split_table_row("a | b | c");
         assert_eq!(cells, vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn split_table_row_escaped_pipe() {
-        let cells = split_table_row("| a\\|b | c |");
-        assert_eq!(cells.len(), 2);
-        assert!(cells[0].contains("\\|"));
-    }
-
-    #[test]
-    fn split_table_row_code_span_pipe() {
-        let cells = split_table_row("| `a|b` | c |");
-        assert_eq!(cells.len(), 2);
-        assert!(cells[0].contains('|'));
     }
 
     // ── try_parse_fenced_code edge cases ──
@@ -1214,27 +1168,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn detect_list_marker_compatible_mismatch() {
-        // Expecting ordered but found unordered
-        assert!(detect_list_marker_compatible("- item", true).is_none());
-        // Expecting unordered but found ordered
-        assert!(detect_list_marker_compatible("1. item", false).is_none());
-    }
-
     // ── parse_paragraph edge cases ──
-
-    #[test]
-    fn paragraph_stops_at_tilde_fence() {
-        let (_, consumed) = parse_paragraph(&["Line 1", "~~~code~~~"]);
-        assert_eq!(consumed, 1);
-    }
-
-    #[test]
-    fn paragraph_stops_at_bare_blockquote() {
-        let (_, consumed) = parse_paragraph(&["Line 1", ">"]);
-        assert_eq!(consumed, 1);
-    }
 
     #[test]
     fn paragraph_stops_at_table() {

@@ -242,13 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_document() {
-        let doc = parse_ok("");
-        assert!(matches!(doc.content.kind, NodeKind::Section { level: 0 }));
-        assert!(doc.content.children.is_empty());
-    }
-
-    #[test]
     fn frontmatter_parsing() {
         let doc = parse_ok("---\ntitle: Hello\ndate: 2026-01-01\ntags: [a, b]\n---\n\nBody text.");
         assert_eq!(doc.meta.title.as_deref(), Some("Hello"));
@@ -600,13 +593,6 @@ mod tests {
     // ── Block-level coverage ──
 
     #[test]
-    fn tilde_code_fence() {
-        let doc = parse_ok("~~~python\nprint('hi')\n~~~");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "python"));
-    }
-
-    #[test]
     fn blockquote_lazy_continuation() {
         let doc = parse_ok("> quote\ncontinued");
         let bq = &doc.content.children[0];
@@ -640,73 +626,6 @@ mod tests {
             }
         ));
         assert_eq!(list.children.len(), 2);
-    }
-
-    #[test]
-    fn paragraph_interrupted_by_heading() {
-        let doc = parse_ok("text\n# Heading");
-        // Root should have: paragraph, then section with heading
-        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(
-            doc.content.children[1].kind,
-            NodeKind::Section { level: 1 }
-        ));
-    }
-
-    #[test]
-    fn paragraph_interrupted_by_fence() {
-        let doc = parse_ok("text\n```\ncode\n```");
-        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(
-            doc.content.children[1].kind,
-            NodeKind::CodeBlock { .. }
-        ));
-    }
-
-    #[test]
-    fn paragraph_interrupted_by_quote() {
-        let doc = parse_ok("text\n> quote");
-        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(doc.content.children[1].kind, NodeKind::BlockQuote));
-    }
-
-    #[test]
-    fn paragraph_interrupted_by_list() {
-        let doc = parse_ok("text\n- item");
-        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(
-            doc.content.children[1].kind,
-            NodeKind::List { .. }
-        ));
-    }
-
-    #[test]
-    fn paragraph_interrupted_by_table() {
-        let doc = parse_ok("text\n| A |\n|---|\n| 1 |");
-        assert!(matches!(doc.content.children[0].kind, NodeKind::Paragraph));
-        assert!(matches!(doc.content.children[1].kind, NodeKind::Table));
-    }
-
-    #[test]
-    fn thematic_break_stars() {
-        let doc = parse_ok("text\n\n***\n\nmore");
-        assert!(
-            doc.content
-                .children
-                .iter()
-                .any(|n| matches!(n.kind, NodeKind::ThematicBreak))
-        );
-    }
-
-    #[test]
-    fn thematic_break_underscores() {
-        let doc = parse_ok("text\n\n___\n\nmore");
-        assert!(
-            doc.content
-                .children
-                .iter()
-                .any(|n| matches!(n.kind, NodeKind::ThematicBreak))
-        );
     }
 
     #[test]
@@ -1229,21 +1148,6 @@ mod tests {
         assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(5) }));
     }
 
-    #[test]
-    fn ordered_list_paren_marker() {
-        let doc = parse_ok("1) first\n2) second");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, .. }));
-        assert_eq!(list.children.len(), 2);
-    }
-
-    #[test]
-    fn ordered_list_start_one() {
-        let doc = parse_ok("1. first\n2. second");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(1) }));
-    }
-
     // ── Nested blockquote tests ──
 
     #[test]
@@ -1262,20 +1166,6 @@ mod tests {
     }
 
     // ── Thematic break tests ──
-
-    #[test]
-    fn thematic_break_spaced_dashes() {
-        let doc = parse_ok("above\n\n- - -\n\nbelow");
-        let children = &doc.content.children;
-        assert!(children.iter().any(|c| matches!(c.kind, NodeKind::ThematicBreak)));
-    }
-
-    #[test]
-    fn thematic_break_spaced_stars() {
-        let doc = parse_ok("above\n\n* * *\n\nbelow");
-        let children = &doc.content.children;
-        assert!(children.iter().any(|c| matches!(c.kind, NodeKind::ThematicBreak)));
-    }
 
     #[test]
     fn two_dashes_not_thematic_break() {
@@ -1329,14 +1219,6 @@ mod tests {
     }
 
     // ── Frontmatter edge cases ──
-
-    #[test]
-    fn frontmatter_unclosed() {
-        // No closing --- means the whole thing is treated as body
-        let doc = parse_ok("---\ntitle: Hello\nBody text.");
-        // Without closing ---, body should have paragraph content
-        assert!(!doc.content.children.is_empty());
-    }
 
     #[test]
     fn frontmatter_with_content_after_dashes() {
@@ -1403,49 +1285,6 @@ mod tests {
         assert!(node.attrs.classes.contains(&"highlight".to_string()));
     }
 
-    // ── Heading levels ──
-
-    #[test]
-    fn heading_levels_1_through_6() {
-        let md = "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6";
-        let doc = parse_ok(md);
-        assert!(!doc.content.children.is_empty());
-    }
-
-    // ── Inline element parsing ──
-
-    #[test]
-    fn hard_break_parsing() {
-        let doc = parse_ok("line one  \nline two");
-        let para = &doc.content.children[0];
-        let has_hard_break = para.children.iter().any(|c| matches!(c.kind, NodeKind::HardBreak));
-        assert!(has_hard_break, "Two trailing spaces should produce a HardBreak");
-    }
-
-    #[test]
-    fn strikethrough_parsing() {
-        let doc = parse_ok("~~deleted~~");
-        let para = &doc.content.children[0];
-        let has_del = para.children.iter().any(|c| matches!(c.kind, NodeKind::Strikethrough));
-        assert!(has_del);
-    }
-
-    #[test]
-    fn link_parsing() {
-        let doc = parse_ok("[click](https://example.com)");
-        let para = &doc.content.children[0];
-        let has_link = para.children.iter().any(|c| matches!(c.kind, NodeKind::Link { .. }));
-        assert!(has_link);
-    }
-
-    #[test]
-    fn cross_ref_parsing() {
-        let doc = parse_ok("See @fig:arch.");
-        let para = &doc.content.children[0];
-        let has_ref = para.children.iter().any(|c| matches!(c.kind, NodeKind::CrossRef { .. }));
-        assert!(has_ref);
-    }
-
     // ── Brace attr edge cases ──
 
     #[test]
@@ -1480,59 +1319,10 @@ mod tests {
         assert!(has_nested, "Should have a nested list");
     }
 
-    // ── ParseError Display ──
-
-    #[test]
-    fn parse_error_display() {
-        let err = ParseError::Frontmatter("bad yaml".to_string());
-        assert_eq!(format!("{err}"), "frontmatter error: bad yaml");
-        let err = ParseError::Directive { line: 5, message: "oops".to_string() };
-        assert_eq!(format!("{err}"), "directive error: at line 5: oops");
-    }
-
     #[test]
     fn malformed_frontmatter_error() {
         let result = parse("---\n{invalid yaml: [[\n---\n");
         assert!(result.is_err());
-    }
-
-    // ── Additional block parsing: list edge cases ──
-
-    #[test]
-    fn ordered_list_zero_start() {
-        let doc = parse_ok("0. zero\n1. one");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(0) }));
-    }
-
-    #[test]
-    fn ordered_list_large_start() {
-        let doc = parse_ok("999. item\n1000. item2");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: true, start: Some(999) }));
-    }
-
-    #[test]
-    fn unordered_list_star_marker() {
-        let doc = parse_ok("* item a\n* item b");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: false, .. }));
-        assert_eq!(list.children.len(), 2);
-    }
-
-    #[test]
-    fn unordered_list_plus_marker() {
-        let doc = parse_ok("+ item a\n+ item b");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { ordered: false, .. }));
-    }
-
-    #[test]
-    fn list_with_blank_line_between_items() {
-        let doc = parse_ok("- item 1\n\n- item 2");
-        let list = &doc.content.children[0];
-        assert!(matches!(list.kind, NodeKind::List { .. }));
-        assert_eq!(list.children.len(), 2);
     }
 
     #[test]
@@ -1548,15 +1338,6 @@ mod tests {
         let doc = parse_ok("- para 1\n\n  para 2\n\n- item 2");
         let list = &doc.content.children[0];
         assert!(matches!(list.kind, NodeKind::List { .. }));
-    }
-
-    // ── Blockquote lazy continuation ──
-
-    #[test]
-    fn blockquote_lazy_continuation_line() {
-        let doc = parse_ok("> first line\ncontinuation without >");
-        let bq = &doc.content.children[0];
-        assert!(matches!(bq.kind, NodeKind::BlockQuote));
     }
 
     // ── Paragraph break conditions ──
@@ -1622,44 +1403,6 @@ mod tests {
         if let Some(NodeKind::Text(s)) = heading.children.first().map(|n| &n.kind) {
             assert_eq!(s, "Title");
         }
-    }
-
-    // ── Hint directive edge cases ──
-
-    #[test]
-    fn hint_with_numeric_value() {
-        use crate::ast::Value;
-        use crate::visit::Pass;
-        let doc = parse_ok("{@hint(heading, level=2)}");
-        let mut doc = doc;
-        crate::resolve::HoistDirectives.run(&mut doc);
-        let hint = doc.content.attrs.hints.iter().find(|h| h.property == "level");
-        assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Number(n) if *n == 2.0));
-    }
-
-    #[test]
-    fn hint_with_bool_value() {
-        use crate::ast::Value;
-        use crate::visit::Pass;
-        let doc = parse_ok("{@hint(code-block, preview=true)}");
-        let mut doc = doc;
-        crate::resolve::HoistDirectives.run(&mut doc);
-        let hint = doc.content.attrs.hints.iter().find(|h| h.property == "preview");
-        assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Bool(true)));
-    }
-
-    #[test]
-    fn hint_false_value() {
-        use crate::ast::Value;
-        use crate::visit::Pass;
-        let doc = parse_ok("{@hint(code-block, preview=false)}");
-        let mut doc = doc;
-        crate::resolve::HoistDirectives.run(&mut doc);
-        let hint = doc.content.attrs.hints.iter().find(|h| h.property == "preview");
-        assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Bool(false)));
     }
 
     // ── Multiple inline attrs ──

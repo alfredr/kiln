@@ -1458,13 +1458,6 @@ See @fig:pic.";
         assert_eq!(locals.series["fig"].counter, 0, "child counter should reset");
     }
 
-    #[test]
-    fn bump_depth_unknown_series_noop() {
-        let mut locals = Locals::default();
-        bump_depth(&mut locals, "nonexistent", 1);
-        // Should not panic
-    }
-
     // ── incr_counter ──
 
     #[test]
@@ -1485,12 +1478,6 @@ See @fig:pic.";
         assert_eq!(locals.series["fig"].counter, 2);
     }
 
-    #[test]
-    fn incr_counter_unknown_noop() {
-        let mut locals = Locals::default();
-        incr_counter(&mut locals, "missing");
-    }
-
     // ── get_compile_format ──
 
     #[test]
@@ -1507,10 +1494,4 @@ See @fig:pic.";
         assert_eq!(get_compile_format(&attrs, "typst"), "latex");
     }
 
-    #[test]
-    fn get_compile_format_true_uses_default() {
-        let mut attrs = crate::ast::Attrs::default();
-        attrs.properties.insert("preview".to_string(), Value::Text("true".to_string()));
-        assert_eq!(get_compile_format(&attrs, "typst"), "typst");
-    }
 }

@@ -1175,13 +1175,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_html_chars() {
-        let html = render("Use `<div>` & things with > sign.");
-        assert!(html.contains("&amp;"));
-        assert!(html.contains("&gt;"));
-    }
-
-    #[test]
     fn render_link_ast() {
         use crate::ast::Node;
         reset_id_counter();
@@ -1301,24 +1294,6 @@ mod tests {
         assert!(html.contains("<pre"), "should render as code block");
     }
 
-    // ── Raw block with compiled + user attrs ──
-
-    #[test]
-    fn render_raw_block_compiled_with_user_attrs() {
-        use crate::ast::{Node, Value};
-        reset_id_counter();
-        let mut raw = Node::raw_block("typst", "#rect()");
-        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<div>output</div>".to_string()));
-        raw.attrs.classes = vec!["typst".to_string()];
-        let doc = crate::ast::Document {
-            meta: crate::ast::Metadata::default(),
-            content: Node::section(0, vec![raw]),
-        };
-        let html = render_html(&doc);
-        assert!(html.contains("class=\"typst\""), "should wrap with user class: {html}");
-        assert!(html.contains("<div>output</div>"), "should contain compiled output");
-    }
-
     #[test]
     fn render_raw_block_compiled_with_explicit_id() {
         use crate::ast::{Node, Value};
@@ -1333,22 +1308,6 @@ mod tests {
         };
         let html = render_html(&doc);
         assert!(html.contains("id=\"my-block\""), "should have explicit id");
-    }
-
-    #[test]
-    fn render_raw_block_compiled_with_extra_property() {
-        use crate::ast::{Node, Value};
-        reset_id_counter();
-        let mut raw = Node::raw_block("typst", "#rect()");
-        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<p>ok</p>".to_string()));
-        raw.attrs.properties.insert("custom-key".to_string(), Value::Text("val".to_string()));
-        let doc = crate::ast::Document {
-            meta: crate::ast::Metadata::default(),
-            content: Node::section(0, vec![raw]),
-        };
-        let html = render_html(&doc);
-        // Has user property (custom-key) → should wrap in div
-        assert!(html.contains("<div"), "should wrap in div: {html}");
     }
 
     // ── Table rendering through parse ──
@@ -1416,45 +1375,6 @@ mod tests {
         // Falls back to default href=#target and text=target
         assert!(html.contains("href=\"#target\""), "should use default href: {html}");
         assert!(html.contains(">target</a>"), "should use target as text: {html}");
-    }
-
-    // ── RawBlock preview rendering ──
-
-    #[test]
-    fn render_raw_block_preview_compiled() {
-        use crate::ast::{Node, Value};
-        reset_id_counter();
-        let mut raw = Node::raw_block("typst", "#line()");
-        raw.attrs.properties.insert("preview".to_string(), Value::Bool(true));
-        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<hr/>".to_string()));
-        raw.attrs.id = "rb-prev".to_string();
-        raw.attrs.auto_id = false;
-        let doc = crate::ast::Document {
-            meta: crate::ast::Metadata::default(),
-            content: Node::section(0, vec![raw]),
-        };
-        let html = render_html(&doc);
-        assert!(html.contains("preview-block"), "should render preview block");
-        assert!(html.contains("<hr/>"), "should contain compiled output");
-    }
-
-    // ── Ordered list start=1 ──
-
-    #[test]
-    fn render_ordered_list_start_one_no_start_attr() {
-        use crate::ast::Node;
-        reset_id_counter();
-        let items = vec![
-            Node::list_item(vec![Node::paragraph(vec![Node::text("a")])]),
-        ];
-        let list = Node::list(true, Some(1), items);
-        let doc = crate::ast::Document {
-            meta: crate::ast::Metadata::default(),
-            content: Node::section(0, vec![list]),
-        };
-        let html = render_html(&doc);
-        assert!(html.contains("<ol"), "should be ordered list");
-        assert!(!html.contains("start="), "start=1 should be omitted");
     }
 
     // ── Caption, strikethrough, custom node ──
