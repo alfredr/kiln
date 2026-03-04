@@ -483,3 +483,771 @@ fn parse_paragraph(lines: &[&str]) -> (RawBlock, usize) {
     }
     (RawBlock::Paragraph(text), i.max(1))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_thematic_break ──
+
+    #[test]
+    fn thematic_break_dashes() {
+        assert!(is_thematic_break("---"));
+        assert!(is_thematic_break("----"));
+        assert!(is_thematic_break("- - -"));
+        assert!(is_thematic_break("  ---  "));
+    }
+
+    #[test]
+    fn thematic_break_stars() {
+        assert!(is_thematic_break("***"));
+        assert!(is_thematic_break("****"));
+        assert!(is_thematic_break("* * *"));
+    }
+
+    #[test]
+    fn thematic_break_underscores() {
+        assert!(is_thematic_break("___"));
+        assert!(is_thematic_break("____"));
+        assert!(is_thematic_break("_ _ _"));
+    }
+
+    #[test]
+    fn not_thematic_break_too_short() {
+        assert!(!is_thematic_break("--"));
+        assert!(!is_thematic_break("**"));
+        assert!(!is_thematic_break("__"));
+        assert!(!is_thematic_break("-"));
+    }
+
+    #[test]
+    fn not_thematic_break_mixed() {
+        assert!(!is_thematic_break("-*-"));
+        assert!(!is_thematic_break("--_"));
+    }
+
+    // ── try_parse_heading ──
+
+    #[test]
+    fn heading_level_1() {
+        let block = try_parse_heading("# Title").unwrap();
+        assert!(matches!(block, RawBlock::Heading { level: 1, .. }));
+    }
+
+    #[test]
+    fn heading_level_6() {
+        let block = try_parse_heading("###### Deep").unwrap();
+        assert!(matches!(block, RawBlock::Heading { level: 6, .. }));
+    }
+
+    #[test]
+    fn heading_too_many_hashes() {
+        assert!(try_parse_heading("####### Not a heading").is_none());
+    }
+
+    #[test]
+    fn heading_no_space_after_hash() {
+        assert!(try_parse_heading("#NoSpace").is_none());
+    }
+
+    #[test]
+    fn heading_empty_after_hash() {
+        let block = try_parse_heading("# ").unwrap();
+        assert!(matches!(block, RawBlock::Heading { level: 1, .. }));
+    }
+
+    #[test]
+    fn heading_with_trailing_hashes() {
+        let block = try_parse_heading("## Title ##").unwrap();
+        if let RawBlock::Heading { text, .. } = block {
+            assert_eq!(text, "Title");
+        }
+    }
+
+    #[test]
+    fn heading_with_attrs() {
+        let block = try_parse_heading("# Title {#my-id .intro}").unwrap();
+        if let RawBlock::Heading { attrs, .. } = block {
+            assert!(attrs.is_some());
+            assert!(attrs.unwrap().contains("#my-id"));
+        }
+    }
+
+    #[test]
+    fn not_a_heading() {
+        assert!(try_parse_heading("Not a heading").is_none());
+    }
+
+    // ── split_table_row ──
+
+    #[test]
+    fn table_row_basic() {
+        let cells = split_table_row("| a | b | c |");
+        assert_eq!(cells, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn table_row_no_outer_pipes() {
+        let cells = split_table_row("a | b | c");
+        assert_eq!(cells, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn table_row_escaped_pipe() {
+        let cells = split_table_row("| a\\|b | c |");
+        assert_eq!(cells.len(), 2);
+    }
+
+    #[test]
+    fn table_row_code_span_pipe() {
+        let cells = split_table_row("| `a|b` | c |");
+        assert_eq!(cells.len(), 2);
+    }
+
+    #[test]
+    fn table_row_single_cell() {
+        let cells = split_table_row("| only |");
+        assert_eq!(cells, vec!["only"]);
+    }
+
+    // ── try_parse_table ──
+
+    #[test]
+    fn table_basic_parse() {
+        let lines = vec!["| A | B |", "|---|---|", "| 1 | 2 |"];
+        let result = try_parse_table(&lines);
+        assert!(result.is_some());
+        let (block, consumed) = result.unwrap();
+        assert!(matches!(block, RawBlock::Table { .. }));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn table_alignment_separators() {
+        let lines = vec!["| L | C | R |", "|:---|:---:|---:|", "| a | b | c |"];
+        let result = try_parse_table(&lines);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn table_no_body_rows() {
+        let lines = vec!["| A | B |", "|---|---|"];
+        let result = try_parse_table(&lines);
+        assert!(result.is_some());
+        if let Some((RawBlock::Table { rows, .. }, _)) = result {
+            assert!(rows.is_empty());
+        }
+    }
+
+    #[test]
+    fn table_not_enough_lines() {
+        let lines = vec!["| A | B |"];
+        assert!(try_parse_table(&lines).is_none());
+    }
+
+    #[test]
+    fn table_invalid_separator() {
+        let lines = vec!["| A | B |", "| not | sep |"];
+        assert!(try_parse_table(&lines).is_none());
+    }
+
+    #[test]
+    fn table_stops_at_blank_line() {
+        let lines = vec!["| A |", "|---|", "| 1 |", "", "| 2 |"];
+        let result = try_parse_table(&lines).unwrap();
+        assert_eq!(result.1, 3); // consumed 3 lines, stopped at blank
+    }
+
+    // ── try_parse_fenced_code ──
+
+    #[test]
+    fn fenced_code_backticks() {
+        let lines = vec!["```rust", "fn main() {}", "```"];
+        let result = try_parse_fenced_code(&lines);
+        assert!(result.is_some());
+        let (block, consumed) = result.unwrap();
+        assert!(matches!(block, RawBlock::CodeBlock { .. }));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn fenced_code_tildes() {
+        let lines = vec!["~~~python", "print('hi')", "~~~"];
+        let result = try_parse_fenced_code(&lines);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().1, 3);
+    }
+
+    #[test]
+    fn fenced_code_unclosed() {
+        let lines = vec!["```", "code without close"];
+        let result = try_parse_fenced_code(&lines);
+        assert!(result.is_some());
+        let (block, consumed) = result.unwrap();
+        assert_eq!(consumed, 2);
+        if let RawBlock::CodeBlock { source, .. } = block {
+            assert!(source.contains("code without close"));
+        }
+    }
+
+    #[test]
+    fn fenced_code_mismatched_chars() {
+        let lines = vec!["```", "code", "~~~"];
+        let result = try_parse_fenced_code(&lines);
+        assert!(result.is_some());
+        // ~~~ shouldn't close a ``` fence
+        let (block, consumed) = result.unwrap();
+        assert_eq!(consumed, 3); // extends to EOF
+        if let RawBlock::CodeBlock { source, .. } = block {
+            assert!(source.contains("~~~"));
+        }
+    }
+
+    #[test]
+    fn fenced_code_five_backticks() {
+        let lines = vec!["`````", "code", "`````"];
+        let result = try_parse_fenced_code(&lines);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn fenced_code_with_brace_attrs() {
+        let lines = vec!["```{=typst}", "#rect()", "```"];
+        let result = try_parse_fenced_code(&lines).unwrap();
+        if let (RawBlock::CodeBlock { attrs, .. }, _) = result {
+            assert!(attrs.is_some());
+            assert!(attrs.unwrap().contains("=typst"));
+        }
+    }
+
+    #[test]
+    fn fenced_code_empty() {
+        let lines = vec!["```", "```"];
+        let result = try_parse_fenced_code(&lines).unwrap();
+        if let (RawBlock::CodeBlock { source, .. }, _) = result {
+            assert!(source.is_empty());
+        }
+    }
+
+    #[test]
+    fn not_a_fence() {
+        let lines = vec!["``not a fence``"];
+        assert!(try_parse_fenced_code(&lines).is_none());
+    }
+
+    // ── detect_list_marker ──
+
+    #[test]
+    fn list_marker_dash() {
+        let result = detect_list_marker("- item");
+        assert_eq!(result, Some((false, 0, 2)));
+    }
+
+    #[test]
+    fn list_marker_star() {
+        let result = detect_list_marker("* item");
+        assert_eq!(result, Some((false, 0, 2)));
+    }
+
+    #[test]
+    fn list_marker_plus() {
+        let result = detect_list_marker("+ item");
+        assert_eq!(result, Some((false, 0, 2)));
+    }
+
+    #[test]
+    fn list_marker_ordered_dot() {
+        let result = detect_list_marker("1. item");
+        assert_eq!(result, Some((true, 1, 3)));
+    }
+
+    #[test]
+    fn list_marker_ordered_paren() {
+        let result = detect_list_marker("1) item");
+        assert_eq!(result, Some((true, 1, 3)));
+    }
+
+    #[test]
+    fn list_marker_ordered_custom_start() {
+        let result = detect_list_marker("5. item");
+        assert_eq!(result, Some((true, 5, 3)));
+    }
+
+    #[test]
+    fn list_marker_ordered_large_number() {
+        let result = detect_list_marker("999. item");
+        assert_eq!(result, Some((true, 999, 5)));
+    }
+
+    #[test]
+    fn list_marker_too_many_digits() {
+        // 10 digits — exceeds 9-digit limit
+        let result = detect_list_marker("1234567890. item");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_marker_thematic_break_not_list() {
+        // "---" is a thematic break, not a list marker
+        let result = detect_list_marker("---");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_marker_no_space_after() {
+        let result = detect_list_marker("-item");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn list_marker_ordered_no_space() {
+        let result = detect_list_marker("1.item");
+        assert!(result.is_none());
+    }
+
+    // ── parse_block_quote ──
+
+    #[test]
+    fn blockquote_simple() {
+        let lines = vec!["> hello", "> world"];
+        let (block, consumed) = parse_block_quote(&lines);
+        assert!(matches!(block, RawBlock::BlockQuote(_)));
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn blockquote_empty_marker() {
+        let lines = vec!["> text", ">", "> more"];
+        let (block, consumed) = parse_block_quote(&lines);
+        assert!(matches!(block, RawBlock::BlockQuote(_)));
+        assert_eq!(consumed, 3);
+    }
+
+    #[test]
+    fn blockquote_stops_at_blank() {
+        let lines = vec!["> text", "", "not quote"];
+        let (_, consumed) = parse_block_quote(&lines);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn blockquote_lazy_continuation() {
+        let lines = vec!["> first", "lazy line"];
+        let (_, consumed) = parse_block_quote(&lines);
+        assert_eq!(consumed, 2); // lazy continuation should be included
+    }
+
+    // ── parse_blocks (integration) ──
+
+    #[test]
+    fn blocks_empty() {
+        let blocks = parse_blocks(&[]);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn blocks_blank_lines_only() {
+        let blocks = parse_blocks(&["", "  ", ""]);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn blocks_paragraph() {
+        let blocks = parse_blocks(&["Hello world."]);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], RawBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn blocks_heading_and_para() {
+        let blocks = parse_blocks(&["# Title", "", "Body text."]);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], RawBlock::Heading { .. }));
+        assert!(matches!(blocks[1], RawBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn blocks_directive() {
+        let blocks = parse_blocks(&["{@series(fig)}"]);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], RawBlock::Directive(_)));
+    }
+
+    #[test]
+    fn blocks_thematic_break() {
+        let blocks = parse_blocks(&["above", "", "---", "", "below"]);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[1], RawBlock::ThematicBreak));
+    }
+
+    // ── is_table_header_start ──
+
+    #[test]
+    fn table_header_start_valid() {
+        assert!(is_table_header_start("| A | B |", Some("|---|---|")));
+    }
+
+    #[test]
+    fn table_header_start_no_pipe() {
+        assert!(!is_table_header_start("no pipes", Some("|---|---|")));
+    }
+
+    #[test]
+    fn table_header_start_no_next_line() {
+        assert!(!is_table_header_start("| A |", None));
+    }
+
+    #[test]
+    fn table_header_start_invalid_sep() {
+        assert!(!is_table_header_start("| A |", Some("| not sep |")));
+    }
+
+    // ── parse_paragraph ──
+
+    #[test]
+    fn paragraph_single_line() {
+        let (block, consumed) = parse_paragraph(&["Hello."]);
+        assert!(matches!(block, RawBlock::Paragraph(_)));
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_multi_line() {
+        let (block, consumed) = parse_paragraph(&["Line 1", "Line 2"]);
+        assert!(matches!(block, RawBlock::Paragraph(ref s) if s.contains("Line 1") && s.contains("Line 2")));
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn paragraph_stops_at_blank() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "", "Line 2"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_heading() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "# Heading"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_fence() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "```code```"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_blockquote() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "> quote"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_list() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "- item"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_directive() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "{@hint(...)}"]);
+        assert_eq!(consumed, 1);
+    }
+
+    // ── list_blank_line_continues ──
+
+    #[test]
+    fn list_blank_continues_same_indent() {
+        let lines = vec!["- item 1", "", "  continued"];
+        assert!(list_blank_line_continues(&lines, 1, 0, 2, false));
+    }
+
+    #[test]
+    fn list_blank_continues_new_item() {
+        let lines = vec!["- item 1", "", "- item 2"];
+        assert!(list_blank_line_continues(&lines, 1, 0, 2, false));
+    }
+
+    #[test]
+    fn list_blank_does_not_continue_at_eof() {
+        let lines = vec!["- item 1", ""];
+        assert!(!list_blank_line_continues(&lines, 1, 0, 2, false));
+    }
+
+    // ── parse_blocks comprehensive ──
+
+    #[test]
+    fn blocks_all_types() {
+        // Exercises every branch of the parse_blocks dispatcher
+        let lines = vec![
+            "",                  // blank line
+            "# Heading",        // heading
+            "",
+            "```",              // fenced code
+            "code here",
+            "```",
+            "",
+            "> quote",          // block quote
+            "",
+            "- item",           // list
+            "",
+            "| A | B |",        // table
+            "|---|---|",
+            "| 1 | 2 |",
+            "",
+            "{@series(fig)}",   // directive
+            "",
+            "paragraph text",   // paragraph
+        ];
+        let blocks = parse_blocks(&lines);
+        assert!(matches!(blocks[0], RawBlock::Heading { .. }));
+        assert!(matches!(blocks[1], RawBlock::CodeBlock { .. }));
+        assert!(matches!(blocks[2], RawBlock::BlockQuote(_)));
+        assert!(matches!(blocks[3], RawBlock::List { .. }));
+        assert!(matches!(blocks[4], RawBlock::Table { .. }));
+        assert!(matches!(blocks[5], RawBlock::Directive(_)));
+        assert!(matches!(blocks[6], RawBlock::Paragraph(_)));
+        assert_eq!(blocks.len(), 7);
+    }
+
+    #[test]
+    fn blocks_code_fence_consumes_correctly() {
+        let lines = vec!["```rust", "fn main() {}", "```", "after"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], RawBlock::CodeBlock { .. }));
+        assert!(matches!(blocks[1], RawBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn blocks_tilde_fence() {
+        let lines = vec!["~~~", "code", "~~~"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], RawBlock::CodeBlock { .. }));
+    }
+
+    #[test]
+    fn blocks_list_with_continuation() {
+        let lines = vec!["- first", "  continued", "- second"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 1);
+        if let RawBlock::List { items, .. } = &blocks[0] {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected list");
+        }
+    }
+
+    #[test]
+    fn blocks_ordered_list() {
+        let lines = vec!["1. first", "2. second"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 1);
+        if let RawBlock::List { ordered, start, items, .. } = &blocks[0] {
+            assert!(ordered);
+            assert_eq!(*start, Some(1));
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected ordered list");
+        }
+    }
+
+    #[test]
+    fn blocks_blockquote_consumes() {
+        let lines = vec!["> line 1", "> line 2", "", "after"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], RawBlock::BlockQuote(_)));
+        assert!(matches!(blocks[1], RawBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn blocks_table_consumes() {
+        let lines = vec!["| H |", "|---|", "| d |", "", "after"];
+        let blocks = parse_blocks(&lines);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], RawBlock::Table { .. }));
+        assert!(matches!(blocks[1], RawBlock::Paragraph(_)));
+    }
+
+    // ── try_parse_table edge cases ──
+
+    #[test]
+    fn try_parse_table_with_alignment() {
+        let lines = vec!["|L|C|R|", "|:---|:---:|---:|", "|a|b|c|"];
+        let result = try_parse_table(&lines).unwrap();
+        let (block, consumed) = result;
+        assert_eq!(consumed, 3);
+        if let RawBlock::Table { header, rows } = block {
+            assert_eq!(header.len(), 3);
+            assert_eq!(rows.len(), 1);
+        }
+    }
+
+    #[test]
+    fn try_parse_table_header_only() {
+        let lines = vec!["|H1|H2|", "|---|---|"];
+        let result = try_parse_table(&lines).unwrap();
+        if let (RawBlock::Table { rows, .. }, consumed) = result {
+            assert!(rows.is_empty());
+            assert_eq!(consumed, 2);
+        }
+    }
+
+    #[test]
+    fn try_parse_table_multiple_body_rows() {
+        let lines = vec!["|H|", "|---|", "|a|", "|b|", "|c|"];
+        let result = try_parse_table(&lines).unwrap();
+        if let (RawBlock::Table { rows, .. }, consumed) = result {
+            assert_eq!(rows.len(), 3);
+            assert_eq!(consumed, 5);
+        }
+    }
+
+    // ── split_table_row edge cases ──
+
+    #[test]
+    fn split_table_row_no_outer_pipes() {
+        let cells = split_table_row("a | b | c");
+        assert_eq!(cells, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_table_row_escaped_pipe() {
+        let cells = split_table_row("| a\\|b | c |");
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].contains("\\|"));
+    }
+
+    #[test]
+    fn split_table_row_code_span_pipe() {
+        let cells = split_table_row("| `a|b` | c |");
+        assert_eq!(cells.len(), 2);
+        assert!(cells[0].contains('|'));
+    }
+
+    // ── try_parse_fenced_code edge cases ──
+
+    #[test]
+    fn fenced_code_with_lang_and_brace_attrs() {
+        let lines = vec!["```rust {#my-code .highlight}", "fn main() {}", "```"];
+        let result = try_parse_fenced_code(&lines).unwrap();
+        if let (RawBlock::CodeBlock { attrs, source }, _) = result {
+            let a = attrs.unwrap();
+            assert!(a.contains("rust"));
+            assert!(a.contains("#my-code"));
+            assert_eq!(source, "fn main() {}");
+        }
+    }
+
+    #[test]
+    fn fenced_code_bare_lang() {
+        let lines = vec!["```python", "print(1)", "```"];
+        let result = try_parse_fenced_code(&lines).unwrap();
+        if let (RawBlock::CodeBlock { attrs, .. }, _) = result {
+            assert_eq!(attrs.unwrap(), "python");
+        }
+    }
+
+    #[test]
+    fn fenced_code_multi_line_source() {
+        let lines = vec!["```", "line 1", "line 2", "line 3", "```"];
+        let result = try_parse_fenced_code(&lines).unwrap();
+        if let (RawBlock::CodeBlock { source, .. }, consumed) = result {
+            assert!(source.contains("line 1\nline 2\nline 3"));
+            assert_eq!(consumed, 5);
+        }
+    }
+
+    // ── try_parse_list edge cases ──
+
+    #[test]
+    fn try_parse_list_ordered_custom_start() {
+        let lines = vec!["5. fifth", "6. sixth"];
+        let result = try_parse_list(&lines).unwrap();
+        if let (RawBlock::List { ordered, start, items }, consumed) = result {
+            assert!(ordered);
+            assert_eq!(start, Some(5));
+            assert_eq!(items.len(), 2);
+            assert_eq!(consumed, 2);
+        }
+    }
+
+    #[test]
+    fn try_parse_list_blank_between_items() {
+        let lines = vec!["- item 1", "", "- item 2"];
+        let result = try_parse_list(&lines).unwrap();
+        if let (RawBlock::List { items, .. }, _) = result {
+            assert_eq!(items.len(), 2);
+        }
+    }
+
+    #[test]
+    fn try_parse_list_partial_indent_continuation() {
+        // Line indented more than base but less than content_indent
+        let lines = vec!["- item", " partial"];
+        let result = try_parse_list(&lines).unwrap();
+        if let (RawBlock::List { items, .. }, consumed) = result {
+            assert_eq!(items.len(), 1);
+            assert_eq!(consumed, 2);
+        }
+    }
+
+    #[test]
+    fn try_parse_list_stops_at_unindented() {
+        let lines = vec!["- item", "not indented"];
+        let result = try_parse_list(&lines).unwrap();
+        if let (RawBlock::List { items, .. }, consumed) = result {
+            assert_eq!(items.len(), 1);
+            assert_eq!(consumed, 1);
+        }
+    }
+
+    #[test]
+    fn try_parse_list_blank_stops_at_eof() {
+        let lines = vec!["- item", ""];
+        let result = try_parse_list(&lines).unwrap();
+        if let (RawBlock::List { items, .. }, consumed) = result {
+            assert_eq!(items.len(), 1);
+            assert_eq!(consumed, 1);
+        }
+    }
+
+    #[test]
+    fn detect_list_marker_compatible_mismatch() {
+        // Expecting ordered but found unordered
+        assert!(detect_list_marker_compatible("- item", true).is_none());
+        // Expecting unordered but found ordered
+        assert!(detect_list_marker_compatible("1. item", false).is_none());
+    }
+
+    // ── parse_paragraph edge cases ──
+
+    #[test]
+    fn paragraph_stops_at_tilde_fence() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "~~~code~~~"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_bare_blockquote() {
+        let (_, consumed) = parse_paragraph(&["Line 1", ">"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_stops_at_table() {
+        let (_, consumed) = parse_paragraph(&["Line 1", "| A |", "|---|"]);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn paragraph_multiline_joins() {
+        let (block, consumed) = parse_paragraph(&["Line 1", "Line 2", "Line 3"]);
+        assert_eq!(consumed, 3);
+        if let RawBlock::Paragraph(text) = block {
+            assert_eq!(text, "Line 1\nLine 2\nLine 3");
+        }
+    }
+}

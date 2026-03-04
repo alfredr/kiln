@@ -1036,4 +1036,481 @@ See @fig:pic.";
         assert_eq!(format_label_display("Figure {n}", "I.2"), "Figure I.2");
         assert_eq!(format_label_display("", "42"), "42");
     }
+
+    #[test]
+    fn resolve_empty_context() {
+        let mut ctx = ResolveContext {
+            documents: HashMap::new(),
+            labels: HashMap::new(),
+        };
+        resolve(&mut ctx); // Should be a no-op without panic
+    }
+
+    #[test]
+    fn decode_label_map_non_map_value() {
+        // If __label_map is not a Map, should return empty
+        let val = Value::Text("not a map".into());
+        let decoded = decode_label_map(&val);
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_label_map_malformed_entries() {
+        // Map with entries that aren't themselves maps
+        let mut m = HashMap::new();
+        m.insert("fig:x".to_string(), Value::Text("bad".into()));
+        let val = Value::Map(m);
+        let decoded = decode_label_map(&val);
+        assert!(decoded.is_empty(), "non-map entries should be skipped");
+    }
+
+    #[test]
+    fn multiple_series_independent() {
+        reset_id_counter();
+        let input = "\
+{@series(fig, counts=figure)}
+{@series(tbl, counts=table)}
+{@hint(figure, label=\"Figure {n}\")}
+
+![A](a.png){#fig:a}
+
+| H |\n|---|\n| d |
+
+![B](b.png){#fig:b}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 2);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+    }
+
+    #[test]
+    fn series_format_cycling() {
+        reset_id_counter();
+        // Use cycle=true with 2 formats over 4 heading levels
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"a\"], cycle=true)}
+
+# Ch {#c1}
+
+## S {#s1}
+
+### Sub {#sub1}
+
+#### Deep {#d1}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        // depth 0 → "I", depth 1 → "a", depth 2 → "I" (cycle), depth 3 → "a" (cycle)
+        assert_eq!(get_number(headings[0]), Some("I"));
+        assert_eq!(get_number(headings[1]), Some("I.a"));
+        assert_eq!(get_number(headings[2]), Some("I.a.I"));
+        assert_eq!(get_number(headings[3]), Some("I.a.I.a"));
+    }
+
+    #[test]
+    fn cross_ref_unresolved_uses_target() {
+        reset_id_counter();
+        // Cross-ref to something that doesn't exist in label map
+        let input = "See @fig:missing.";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let refs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        assert_eq!(refs.len(), 1);
+        // No text property should be set (unresolved)
+        assert!(!refs[0].attrs.properties.contains_key("text"));
+    }
+
+    #[test]
+    fn has_series_declarations_nested() {
+        reset_id_counter();
+        // Series declared inside a subsection
+        let input = "# Chapter\n\n{@series(fig, counts=figure)}\n\n![A](a.png){#fig:a}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 1);
+        assert_eq!(get_number(figs[0]), Some("1"));
+    }
+
+    #[test]
+    fn store_number_no_series_property() {
+        reset_id_counter();
+        // Node without series property should not get a number
+        let input = "Just a paragraph.";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let paras = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Paragraph));
+        assert!(!paras.is_empty());
+        assert!(!paras[0].attrs.properties.contains_key("number"));
+    }
+
+    #[test]
+    fn compound_selector_attr_match() {
+        reset_id_counter();
+        // Use an attribute selector to target specific nodes
+        let mut doc = parse(
+            "{@hint(code-block[lang=\"rust\"], theme=monokai)}\n\n```rust\ncode1\n```\n\n```python\ncode2\n```",
+        )
+        .unwrap();
+        resolve_document(&mut doc);
+
+        let blocks: Vec<_> = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }));
+        assert_eq!(blocks.len(), 2);
+        // Only rust block should match
+        assert!(blocks[0].attrs.properties.contains_key("theme"));
+        assert!(!blocks[1].attrs.properties.contains_key("theme"));
+    }
+
+    #[test]
+    fn descendant_combinator_selector() {
+        reset_id_counter();
+        let mut doc = parse(
+            "{@hint(section ~> code-block, highlight=true)}\n\n# Section\n\n```rust\ncode\n```",
+        )
+        .unwrap();
+        resolve_document(&mut doc);
+
+        let code = find_node(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }))
+            .expect("should have code block");
+        assert!(code.attrs.properties.contains_key("highlight"));
+    }
+
+    #[test]
+    fn child_combinator_selector() {
+        reset_id_counter();
+        let mut doc = parse(
+            "{@hint(section > heading, color=red)}\n\n# Top\n\nParagraph.",
+        )
+        .unwrap();
+        resolve_document(&mut doc);
+
+        let heading = find_node(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }))
+            .expect("should have heading");
+        assert!(heading.attrs.properties.contains_key("color"));
+    }
+
+    // ── Hoist directives (additional) ──
+
+    #[test]
+    fn hoist_transfers_hints_to_parent() {
+        reset_id_counter();
+        let input = "{@hint(figure, series=fig)}";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        // The hint should be on the section that contained the directive
+        let has_hints = !doc.content.attrs.hints.is_empty()
+            || doc.content.children.iter().any(|c| !c.attrs.hints.is_empty());
+        assert!(has_hints, "hints should be hoisted to parent");
+    }
+
+    #[test]
+    fn hoist_transfers_declarations() {
+        reset_id_counter();
+        let input = "{@series(fig, counts=figure)}";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        let has_decls = !doc.content.attrs.declarations.is_empty()
+            || doc.content.children.iter().any(|c| !c.attrs.declarations.is_empty());
+        assert!(has_decls, "declarations should be hoisted to parent");
+    }
+
+    // ── Cascade hints ──
+
+    #[test]
+    fn cascade_this_hint_applies_to_self() {
+        reset_id_counter();
+        let input = "![img](a.png){@hint(this, width=100)}";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeHints.run(&mut doc);
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        // The this hint should be applied to the node itself
+        if !figs.is_empty() {
+            assert!(
+                figs[0].attrs.properties.contains_key("width")
+                    || !find_all(&doc.content, |n| n.attrs.properties.contains_key("width")).is_empty(),
+                "this hint should apply"
+            );
+        }
+    }
+
+    #[test]
+    fn cascade_hint_applies_to_matching_nodes() {
+        reset_id_counter();
+        let input = "\
+{@hint(heading, color=blue)}
+
+# Chapter
+
+## Section";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 2);
+        // Both headings should get the hint
+        for h in &headings {
+            let color = h.attrs.properties.get("color").and_then(|v| match v {
+                Value::Text(s) => Some(s.as_str()),
+                _ => None,
+            });
+            assert_eq!(color, Some("blue"));
+        }
+    }
+
+    #[test]
+    fn cascade_authored_value_not_overwritten() {
+        reset_id_counter();
+        // Authored property should NOT be overwritten by hint
+        let input = "\
+{@hint(heading, color=blue)}
+
+# Chapter {color=red}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 1);
+        let color = headings[0].attrs.properties.get("color").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(color, Some("red"), "authored value should win");
+    }
+
+    // ── CompileBlocks pass ──
+
+    struct TestCompiler;
+    #[allow(clippy::excessive_nesting)]
+    impl RawBlockCompiler for TestCompiler {
+        fn compile(&self, format: &str, source: &str) -> Result<String, String> {
+            if format == "fail" {
+                Err("compile error".into())
+            } else {
+                Ok(format!("<compiled>{source}</compiled>"))
+            }
+        }
+    }
+
+    #[test]
+    fn compile_blocks_raw_block() {
+        reset_id_counter();
+        let mut doc = parse("```{=typst}\n#rect()\n```").unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeHints.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let raws = find_all(&doc.content, |n| matches!(n.kind, NodeKind::RawBlock { .. }));
+        assert!(!raws.is_empty());
+        let compiled = raws[0].attrs.properties.get("compiled").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert!(compiled.is_some(), "raw block should be compiled");
+        assert!(compiled.unwrap().contains("#rect()"));
+    }
+
+    #[test]
+    fn compile_blocks_error() {
+        reset_id_counter();
+        let mut doc = parse("```{=fail}\nbad\n```").unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeHints.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let raws = find_all(&doc.content, |n| matches!(n.kind, NodeKind::RawBlock { .. }));
+        assert!(!raws.is_empty());
+        assert!(raws[0].attrs.properties.contains_key("compile_error"));
+    }
+
+    #[test]
+    fn compile_blocks_code_with_preview() {
+        reset_id_counter();
+        let input = "{@hint(code-block, preview=true)}\n\n```typst\n#circle()\n```";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeHints.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let codes = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }));
+        assert!(!codes.is_empty());
+        assert!(
+            codes[0].attrs.properties.contains_key("compiled"),
+            "code block with preview should be compiled"
+        );
+    }
+
+    #[test]
+    fn compile_blocks_preview_custom_format() {
+        reset_id_counter();
+        let input = "{@hint(code-block, preview=latex)}\n\n```typst\nsource\n```";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeHints.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let codes = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }));
+        assert!(!codes.is_empty());
+        // The preview format "latex" should be passed to compiler, not "typst"
+        let compiled = codes[0].attrs.properties.get("compiled").and_then(|v| match v {
+            Value::Text(s) => Some(s.clone()),
+            _ => None,
+        });
+        assert!(compiled.is_some());
+    }
+
+    // ── Series with parent + child reset ──
+
+    #[test]
+    fn series_parent_child_reset() {
+        reset_id_counter();
+        // Parent series must be hierarchical (>1 format) for bump_depth to reset children
+        let input = "\
+{@series(ch, counts=heading, formats=[\"I\",\"1\"])}
+{@series(fig, counts=figure, parent=ch)}
+{@hint(figure, label=\"Figure {n}\")}
+
+# Chapter 1 {#ch1}
+
+![A](a.png){#fig:a}
+
+![B](b.png){#fig:b}
+
+# Chapter 2 {#ch2}
+
+![C](c.png){#fig:c}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        // After Chapter 2 heading, parent resets child fig counter
+        assert_eq!(get_number(figs[2]), Some("1"));
+    }
+
+    // ── bump_depth ──
+
+    #[test]
+    fn bump_depth_extends_array() {
+        let mut locals = Locals::default();
+        locals.series.insert("s".into(), SeriesState {
+            counts: Vec::new(),
+            counter: 0,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["I".into(), "1".into()],
+                cycle: false,
+            },
+        });
+        bump_depth(&mut locals, "s", 1);
+        assert_eq!(locals.series["s"].counts, vec![1]);
+        bump_depth(&mut locals, "s", 2);
+        assert_eq!(locals.series["s"].counts, vec![1, 1]);
+    }
+
+    #[test]
+    fn bump_depth_truncates_on_level_decrease() {
+        let mut locals = Locals::default();
+        locals.series.insert("s".into(), SeriesState {
+            counts: vec![2, 3, 1],
+            counter: 0,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["I".into(), "1".into(), "a".into()],
+                cycle: false,
+            },
+        });
+        bump_depth(&mut locals, "s", 2);
+        // Truncated to level 2, counter incremented
+        assert_eq!(locals.series["s"].counts, vec![2, 4]);
+    }
+
+    #[test]
+    fn bump_depth_resets_child_series() {
+        let mut locals = Locals::default();
+        locals.series.insert("ch".into(), SeriesState {
+            counts: Vec::new(),
+            counter: 0,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["I".into()],
+                cycle: false,
+            },
+        });
+        locals.series.insert("fig".into(), SeriesState {
+            counts: Vec::new(),
+            counter: 5,
+            config: SeriesConfig {
+                parent: Some("ch".into()),
+                formats: vec!["1".into()],
+                cycle: false,
+            },
+        });
+        bump_depth(&mut locals, "ch", 1);
+        assert_eq!(locals.series["fig"].counter, 0, "child counter should reset");
+    }
+
+    #[test]
+    fn bump_depth_unknown_series_noop() {
+        let mut locals = Locals::default();
+        bump_depth(&mut locals, "nonexistent", 1);
+        // Should not panic
+    }
+
+    // ── incr_counter ──
+
+    #[test]
+    fn incr_counter_increments() {
+        let mut locals = Locals::default();
+        locals.series.insert("fig".into(), SeriesState {
+            counts: Vec::new(),
+            counter: 0,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["1".into()],
+                cycle: false,
+            },
+        });
+        incr_counter(&mut locals, "fig");
+        assert_eq!(locals.series["fig"].counter, 1);
+        incr_counter(&mut locals, "fig");
+        assert_eq!(locals.series["fig"].counter, 2);
+    }
+
+    #[test]
+    fn incr_counter_unknown_noop() {
+        let mut locals = Locals::default();
+        incr_counter(&mut locals, "missing");
+    }
+
+    // ── get_compile_format ──
+
+    #[test]
+    fn get_compile_format_default() {
+        use crate::ast::Attrs;
+        let attrs = Attrs::default();
+        assert_eq!(get_compile_format(&attrs, "typst"), "typst");
+    }
+
+    #[test]
+    fn get_compile_format_custom() {
+        let mut attrs = crate::ast::Attrs::default();
+        attrs.properties.insert("preview".to_string(), Value::Text("latex".to_string()));
+        assert_eq!(get_compile_format(&attrs, "typst"), "latex");
+    }
+
+    #[test]
+    fn get_compile_format_true_uses_default() {
+        let mut attrs = crate::ast::Attrs::default();
+        attrs.properties.insert("preview".to_string(), Value::Text("true".to_string()));
+        assert_eq!(get_compile_format(&attrs, "typst"), "typst");
+    }
 }

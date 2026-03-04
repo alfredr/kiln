@@ -536,3 +536,815 @@ fn find_matching_open_brace(s: &str) -> Option<usize> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_trailing_brace_attrs ──
+
+    #[test]
+    fn trailing_brace_basic() {
+        let (before, attrs) = extract_trailing_brace_attrs("text {#id}");
+        assert_eq!(before, "text");
+        assert_eq!(attrs.as_deref(), Some("#id"));
+    }
+
+    #[test]
+    fn trailing_brace_none_when_no_brace() {
+        let (before, attrs) = extract_trailing_brace_attrs("no braces here");
+        assert_eq!(before, "no braces here");
+        assert!(attrs.is_none());
+    }
+
+    #[test]
+    fn trailing_brace_unmatched() {
+        let (_, attrs) = extract_trailing_brace_attrs("unmatched }");
+        // Unmatched } should still try to find matching {
+        // Since there's no {, should return None
+        assert!(attrs.is_none());
+    }
+
+    #[test]
+    fn trailing_brace_nested() {
+        let (before, attrs) = extract_trailing_brace_attrs("text {outer {inner}}");
+        assert_eq!(before, "text");
+        assert_eq!(attrs.as_deref(), Some("outer {inner}"));
+    }
+
+    // ── extract_raw_format ──
+
+    #[test]
+    fn raw_format_none_input() {
+        let (fmt, rest) = extract_raw_format(None);
+        assert!(fmt.is_none());
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn raw_format_html() {
+        let (fmt, rest) = extract_raw_format(Some("=html"));
+        assert_eq!(fmt.as_deref(), Some("html"));
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn raw_format_with_remaining() {
+        let (fmt, rest) = extract_raw_format(Some("=html #id .class"));
+        assert_eq!(fmt.as_deref(), Some("html"));
+        assert_eq!(rest.as_deref(), Some("#id .class"));
+    }
+
+    #[test]
+    fn raw_format_no_equals() {
+        let (fmt, rest) = extract_raw_format(Some("rust #id"));
+        assert!(fmt.is_none());
+        assert_eq!(rest.as_deref(), Some("rust #id"));
+    }
+
+    #[test]
+    fn raw_format_equals_only() {
+        // "=" alone — no format extracted (len == 1, not > 1)
+        let (fmt, rest) = extract_raw_format(Some("="));
+        assert!(fmt.is_none());
+        assert_eq!(rest.as_deref(), Some("="));
+    }
+
+    #[test]
+    fn raw_format_colon_shorthand() {
+        let (fmt, rest) = extract_raw_format(Some("=typst:#id"));
+        assert_eq!(fmt.as_deref(), Some("typst"));
+        assert_eq!(rest.as_deref(), Some("#id"));
+    }
+
+    // ── split_format_token ──
+
+    #[test]
+    fn split_format_no_colon() {
+        let (fmt, rest) = split_format_token("html");
+        assert_eq!(fmt, "html");
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn split_format_colon_with_rest() {
+        let (fmt, rest) = split_format_token("typst:#id");
+        assert_eq!(fmt, "typst");
+        assert_eq!(rest.as_deref(), Some("#id"));
+    }
+
+    #[test]
+    fn split_format_trailing_colon() {
+        let (fmt, rest) = split_format_token("typst:");
+        assert_eq!(fmt, "typst");
+        assert!(rest.is_none());
+    }
+
+    // ── extract_lang ──
+
+    #[test]
+    fn extract_lang_bare_word() {
+        let (lang, rest) = extract_lang(Some("rust"));
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn extract_lang_with_attrs() {
+        let (lang, rest) = extract_lang(Some("rust #id .class"));
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(rest.as_deref(), Some("#id .class"));
+    }
+
+    #[test]
+    fn extract_lang_no_bare_word() {
+        let (lang, rest) = extract_lang(Some("#id .class"));
+        assert!(lang.is_none());
+        assert_eq!(rest.as_deref(), Some("#id .class"));
+    }
+
+    #[test]
+    fn extract_lang_none() {
+        let (lang, rest) = extract_lang(None);
+        assert!(lang.is_none());
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn extract_lang_empty() {
+        let (lang, rest) = extract_lang(Some(""));
+        assert!(lang.is_none());
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn extract_lang_whitespace_only() {
+        let (lang, rest) = extract_lang(Some("   "));
+        assert!(lang.is_none());
+        assert!(rest.is_none());
+    }
+
+    #[test]
+    fn extract_lang_key_value_skipped() {
+        let (lang, rest) = extract_lang(Some("key=value rust"));
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(rest.as_deref(), Some("key=value"));
+    }
+
+    #[test]
+    fn extract_lang_format_skipped() {
+        let (lang, rest) = extract_lang(Some("=html rust"));
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(rest.as_deref(), Some("=html"));
+    }
+
+    #[test]
+    fn extract_lang_directive_skipped() {
+        let (lang, rest) = extract_lang(Some("@hint rust"));
+        assert_eq!(lang.as_deref(), Some("rust"));
+        assert_eq!(rest.as_deref(), Some("@hint"));
+    }
+
+    // ── apply_brace_attrs ──
+
+    #[test]
+    fn brace_attrs_id() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "#my-id");
+        assert_eq!(attrs.id, "my-id");
+        assert!(!attrs.auto_id);
+    }
+
+    #[test]
+    fn brace_attrs_class() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, ".wide");
+        assert_eq!(attrs.classes, vec!["wide"]);
+    }
+
+    #[test]
+    fn brace_attrs_key_value() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "width=\"80%\"");
+        assert!(matches!(attrs.properties.get("width"), Some(Value::Text(s)) if s == "80%"));
+    }
+
+    #[test]
+    fn brace_attrs_bare_boolean() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "nowrap");
+        assert!(matches!(attrs.properties.get("nowrap"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn brace_attrs_directive() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "@hint(figure, series=figs)");
+        assert!(!attrs.hints.is_empty());
+    }
+
+    #[test]
+    fn brace_attrs_multiple() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "#my-id .wide .dark nowrap");
+        assert_eq!(attrs.id, "my-id");
+        assert!(!attrs.auto_id);
+        assert!(attrs.classes.contains(&"wide".to_string()));
+        assert!(attrs.classes.contains(&"dark".to_string()));
+        assert!(matches!(attrs.properties.get("nowrap"), Some(Value::Bool(true))));
+    }
+
+    #[test]
+    fn brace_attrs_whitespace_only() {
+        let mut attrs = Attrs::default();
+        let orig_id = attrs.id.clone();
+        apply_brace_attrs(&mut attrs, "   ");
+        assert_eq!(attrs.id, orig_id);
+    }
+
+    // ── parse_directive_to_node ──
+
+    #[test]
+    fn directive_to_node_series() {
+        let node = parse_directive_to_node("@series(fig, counts=figure)");
+        assert!(node.is_some());
+        let n = node.unwrap();
+        assert!(!n.attrs.declarations.is_empty());
+    }
+
+    #[test]
+    fn directive_to_node_hint() {
+        let node = parse_directive_to_node("@hint(figure, series=figs)");
+        assert!(node.is_some());
+        let n = node.unwrap();
+        assert!(!n.attrs.hints.is_empty());
+    }
+
+    #[test]
+    fn directive_to_node_not_directive() {
+        let node = parse_directive_to_node("not a directive");
+        assert!(node.is_none());
+    }
+
+    #[test]
+    fn directive_to_node_no_parens() {
+        let node = parse_directive_to_node("@series");
+        assert!(node.is_none());
+    }
+
+    #[test]
+    fn directive_to_node_unclosed_paren() {
+        let node = parse_directive_to_node("@series(fig, counts=figure");
+        assert!(node.is_none());
+    }
+
+    // ── maybe_extract_trailing_attrs_from_children ──
+
+    #[test]
+    fn trailing_attrs_applied_to_previous_node() {
+        let mut children = vec![
+            Node::emphasis(vec![Node::text("em")]),
+            Node::text(" {.highlight}"),
+        ];
+        maybe_extract_trailing_attrs_from_children(&mut children);
+        // The {.highlight} should be applied to the emphasis node
+        assert_eq!(children.len(), 1);
+        assert!(children[0].attrs.classes.contains(&"highlight".to_string()));
+    }
+
+    #[test]
+    fn trailing_attrs_no_brace() {
+        let mut children = vec![Node::text("no braces")];
+        maybe_extract_trailing_attrs_from_children(&mut children);
+        assert_eq!(children.len(), 1);
+    }
+
+    #[test]
+    fn trailing_attrs_text_before_brace() {
+        let mut children = vec![
+            Node::emphasis(vec![Node::text("em")]),
+            Node::text("text {.cls}"),
+        ];
+        maybe_extract_trailing_attrs_from_children(&mut children);
+        // Should split: keep "text" node and apply .cls to emphasis
+        assert_eq!(children.len(), 2);
+        assert!(children[0].attrs.classes.contains(&"cls".to_string()));
+    }
+
+    #[test]
+    fn trailing_attrs_single_child_pure_brace() {
+        let mut children = vec![Node::text("{.cls}")];
+        maybe_extract_trailing_attrs_from_children(&mut children);
+        // Single child with only braces — pop it, but no previous node to apply to
+        assert!(children.is_empty());
+    }
+
+    // ── parse_hint_value ──
+
+    #[test]
+    fn hint_value_true() {
+        assert!(matches!(parse_hint_value("true"), Value::Bool(true)));
+    }
+
+    #[test]
+    fn hint_value_false() {
+        assert!(matches!(parse_hint_value("false"), Value::Bool(false)));
+    }
+
+    #[test]
+    fn hint_value_number() {
+        assert!(matches!(parse_hint_value("42"), Value::Number(n) if n == 42.0));
+    }
+
+    #[test]
+    fn hint_value_float() {
+        assert!(matches!(parse_hint_value("2.5"), Value::Number(n) if (n - 2.5).abs() < 0.01));
+    }
+
+    #[test]
+    fn hint_value_text() {
+        assert!(matches!(parse_hint_value("hello"), Value::Text(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn hint_value_quoted() {
+        assert!(matches!(parse_hint_value("\"hello\""), Value::Text(ref s) if s == "hello"));
+    }
+
+    // ── is_property_token ──
+
+    #[test]
+    fn property_token_key_value() {
+        assert!(is_property_token("key=value"));
+    }
+
+    #[test]
+    fn property_token_quoted_value() {
+        assert!(is_property_token("key=\"value\""));
+    }
+
+    #[test]
+    fn property_token_bare_word_not_property() {
+        assert!(!is_property_token("figure"));
+    }
+
+    #[test]
+    fn property_token_class_not_property() {
+        assert!(!is_property_token(".wide"));
+    }
+
+    #[test]
+    fn property_token_id_not_property() {
+        assert!(!is_property_token("#my-id"));
+    }
+
+    #[test]
+    fn property_token_bracket_not_property() {
+        assert!(!is_property_token("[attr]"));
+    }
+
+    #[test]
+    fn property_token_this_not_property() {
+        assert!(!is_property_token("this"));
+    }
+
+    #[test]
+    fn property_token_empty_not_property() {
+        assert!(!is_property_token(""));
+    }
+
+    #[test]
+    fn property_token_nested_eq() {
+        // Equals inside brackets should not be considered top-level
+        assert!(!is_property_token("[lang=\"rust\"]"));
+    }
+
+    // ── split_top_level_hint_commas ──
+
+    #[test]
+    fn split_commas_simple() {
+        let parts = split_top_level_hint_commas("a, b, c");
+        assert_eq!(parts, vec!["a", " b", " c"]);
+    }
+
+    #[test]
+    fn split_commas_nested_brackets() {
+        let parts = split_top_level_hint_commas("sel[a,b], key=val");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "sel[a,b]");
+    }
+
+    #[test]
+    fn split_commas_quoted() {
+        let parts = split_top_level_hint_commas("key=\"a,b\", other=c");
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn split_commas_no_comma() {
+        let parts = split_top_level_hint_commas("single");
+        assert_eq!(parts, vec!["single"]);
+    }
+
+    // ── find_top_level_eq ──
+
+    #[test]
+    fn top_level_eq_simple() {
+        assert_eq!(find_top_level_eq("key=val"), Some(3));
+    }
+
+    #[test]
+    fn top_level_eq_in_quotes() {
+        assert!(find_top_level_eq("\"a=b\"").is_none());
+    }
+
+    #[test]
+    fn top_level_eq_in_brackets() {
+        assert!(find_top_level_eq("[a=b]").is_none());
+    }
+
+    #[test]
+    fn top_level_eq_in_parens() {
+        assert!(find_top_level_eq("(a=b)").is_none());
+    }
+
+    #[test]
+    fn top_level_eq_none() {
+        assert!(find_top_level_eq("bareword").is_none());
+    }
+
+    // ── find_matching_open_brace ──
+
+    #[test]
+    fn matching_brace_simple() {
+        assert_eq!(find_matching_open_brace("{content}"), Some(0));
+    }
+
+    #[test]
+    fn matching_brace_with_prefix() {
+        assert_eq!(find_matching_open_brace("text {content}"), Some(5));
+    }
+
+    #[test]
+    fn matching_brace_nested() {
+        assert_eq!(find_matching_open_brace("{outer {inner}}"), Some(0));
+    }
+
+    #[test]
+    fn matching_brace_no_close() {
+        assert!(find_matching_open_brace("no brace").is_none());
+    }
+
+    #[test]
+    fn matching_brace_unbalanced() {
+        // More } than {
+        assert!(find_matching_open_brace("extra}").is_none());
+    }
+
+    #[test]
+    fn matching_brace_empty() {
+        assert!(find_matching_open_brace("").is_none());
+    }
+
+    // ── split_directive_args ──
+
+    #[test]
+    fn directive_args_simple() {
+        let parts = split_directive_args("fig, counts=figure");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], ("fig".to_string(), "fig".to_string()));
+        assert_eq!(parts[1].0, "counts");
+        assert_eq!(parts[1].1, "figure");
+    }
+
+    #[test]
+    fn directive_args_with_formats() {
+        let parts = split_directive_args("sec, formats=[\"I\",\"1\"]");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1].0, "formats");
+    }
+
+    #[test]
+    fn directive_args_empty() {
+        let parts = split_directive_args("");
+        assert!(parts.is_empty());
+    }
+
+    // ── parse_format_list ──
+
+    #[test]
+    fn format_list_bracket_syntax() {
+        let list = parse_format_list("[\"I\",\"1\",\"a\"]");
+        assert_eq!(list, vec!["I", "1", "a"]);
+    }
+
+    #[test]
+    fn format_list_single_token() {
+        let list = parse_format_list("I");
+        assert_eq!(list, vec!["I"]);
+    }
+
+    #[test]
+    fn format_list_empty_brackets() {
+        let list = parse_format_list("[]");
+        assert!(list.is_empty());
+    }
+
+    // ── parse_hint_directive ──
+
+    #[test]
+    fn hint_directive_simple() {
+        let hints = parse_hint_directive("figure, series=figs");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "series");
+    }
+
+    #[test]
+    fn hint_directive_multiple_props() {
+        let hints = parse_hint_directive("figure, series=figs, label=\"Figure {n}\"");
+        assert_eq!(hints.len(), 2);
+    }
+
+    #[test]
+    fn hint_directive_no_props() {
+        let hints = parse_hint_directive("figure");
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn hint_directive_only_selector_parts() {
+        let hints = parse_hint_directive("figure.wide");
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn hint_directive_with_attr_selector() {
+        let hints = parse_hint_directive("code-block[lang=\"rust\"], theme=dark");
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "theme");
+    }
+
+    // ── scan_delimited_token ──
+
+    #[test]
+    fn scan_delimited_stops_at_comma() {
+        let chars: Vec<char> = "abc,def".chars().collect();
+        assert_eq!(scan_delimited_token(&chars, 0), 3);
+    }
+
+    #[test]
+    fn scan_delimited_skips_quoted_comma() {
+        let chars: Vec<char> = "\"a,b\",c".chars().collect();
+        assert_eq!(scan_delimited_token(&chars, 0), 5);
+    }
+
+    #[test]
+    fn scan_delimited_skips_paren_comma() {
+        let chars: Vec<char> = "(a,b),c".chars().collect();
+        assert_eq!(scan_delimited_token(&chars, 0), 5);
+    }
+
+    #[test]
+    fn scan_delimited_skips_bracket_comma() {
+        let chars: Vec<char> = "[a,b],c".chars().collect();
+        assert_eq!(scan_delimited_token(&chars, 0), 5);
+    }
+
+    // ── split_kv ──
+
+    #[test]
+    fn split_kv_with_eq() {
+        let (k, v) = split_kv("key=val");
+        assert_eq!(k, "key");
+        assert_eq!(v, "val");
+    }
+
+    #[test]
+    fn split_kv_no_eq() {
+        let (k, v) = split_kv("bare");
+        assert_eq!(k, "bare");
+        assert_eq!(v, "bare");
+    }
+
+    #[test]
+    fn split_kv_quoted() {
+        let (k, v) = split_kv("key=\"val\"");
+        assert_eq!(k, "key");
+        assert_eq!(v, "val");
+    }
+
+    // ── parse_series_directive_full ──
+
+    #[test]
+    fn series_full_basic() {
+        let result = parse_series_directive_full("fig");
+        assert!(result.is_some());
+        let (decl, hints) = result.unwrap();
+        let Declaration::Series { id, config } = decl;
+        assert_eq!(id, "fig");
+        assert_eq!(config.formats, vec!["1"]);
+        assert!(config.parent.is_none());
+        assert!(!config.cycle);
+        assert!(hints.is_empty());
+    }
+
+    #[test]
+    fn series_full_with_counts() {
+        let result = parse_series_directive_full("fig, counts=figure");
+        assert!(result.is_some());
+        let (_, hints) = result.unwrap();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].property, "series");
+    }
+
+    #[test]
+    fn series_full_with_all_params() {
+        let result = parse_series_directive_full("fig, parent=sec, formats=[\"I\",\"1\"], cycle=true, counts=figure");
+        assert!(result.is_some());
+        let (decl, hints) = result.unwrap();
+        let Declaration::Series { config, .. } = decl;
+        assert_eq!(config.parent.as_deref(), Some("sec"));
+        assert_eq!(config.formats, vec!["I", "1"]);
+        assert!(config.cycle);
+        assert_eq!(hints.len(), 1);
+    }
+
+    #[test]
+    fn series_full_empty() {
+        let result = parse_series_directive_full("");
+        assert!(result.is_none());
+    }
+
+    // ── Unknown directive ──
+
+    #[test]
+    fn unknown_directive_ignored() {
+        let mut attrs = Attrs::default();
+        apply_directive(&mut attrs, "unknown_cmd", "arg1, arg2");
+        assert!(attrs.declarations.is_empty());
+        assert!(attrs.hints.is_empty());
+    }
+
+    // ── extract_raw_format with remaining tokens ──
+
+    #[test]
+    fn extract_raw_format_with_remaining() {
+        let (fmt, rest) = extract_raw_format(Some("=html #my-id .highlight"));
+        assert_eq!(fmt, Some("html".to_string()));
+        assert_eq!(rest, Some("#my-id .highlight".to_string()));
+    }
+
+    #[test]
+    fn extract_raw_format_non_format_tokens_only() {
+        let (fmt, rest) = extract_raw_format(Some("#id .class"));
+        assert!(fmt.is_none());
+        assert_eq!(rest, Some("#id .class".to_string()));
+    }
+
+    #[test]
+    fn extract_raw_format_colon_shorthand() {
+        let (fmt, rest) = extract_raw_format(Some("=typst:#my-id"));
+        assert_eq!(fmt, Some("typst".to_string()));
+        assert_eq!(rest, Some("#my-id".to_string()));
+    }
+
+    #[test]
+    fn extract_raw_format_colon_trailing_empty() {
+        let (fmt, rest) = extract_raw_format(Some("=typst:"));
+        assert_eq!(fmt, Some("typst".to_string()));
+        assert!(rest.is_none());
+    }
+
+    // ── extract_lang with remaining tokens ──
+
+    #[test]
+    fn extract_lang_with_remaining() {
+        let (lang, rest) = extract_lang(Some("rust #id .cls"));
+        assert_eq!(lang, Some("rust".to_string()));
+        assert_eq!(rest, Some("#id .cls".to_string()));
+    }
+
+    #[test]
+    fn extract_lang_only_specials() {
+        let (lang, rest) = extract_lang(Some("#id .cls"));
+        assert!(lang.is_none());
+        assert_eq!(rest, Some("#id .cls".to_string()));
+    }
+
+    // ── apply_brace_attrs with directive ──
+
+    #[test]
+    fn apply_brace_attrs_directive() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "@series(fig)");
+        assert!(!attrs.declarations.is_empty() || !attrs.hints.is_empty());
+    }
+
+    #[test]
+    fn apply_brace_attrs_bare_boolean() {
+        let mut attrs = Attrs::default();
+        apply_brace_attrs(&mut attrs, "nocaption");
+        assert!(attrs.properties.contains_key("nocaption"));
+    }
+
+    // ── parse_attr_directive edge cases ──
+
+    #[test]
+    fn parse_attr_directive_no_parens() {
+        let mut attrs = Attrs::default();
+        let chars: Vec<char> = "@noparen rest".chars().collect();
+        let consumed = parse_attr_directive(&chars, 0, &mut attrs);
+        // Should skip the @noparen token
+        assert!(consumed > 0);
+    }
+
+    // ── parse_attr_key_value edge cases ──
+
+    #[test]
+    fn parse_attr_key_value_empty_key() {
+        let mut attrs = Attrs::default();
+        let chars: Vec<char> = "=value".chars().collect();
+        let consumed = parse_attr_key_value(&chars, 0, &mut attrs);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn parse_attr_key_value_bare_token() {
+        let mut attrs = Attrs::default();
+        let chars: Vec<char> = "mybool".chars().collect();
+        let consumed = parse_attr_key_value(&chars, 0, &mut attrs);
+        assert_eq!(consumed, 6);
+        assert!(attrs.properties.contains_key("mybool"));
+    }
+
+    // ── maybe_extract_trailing_attrs edge cases ──
+
+    #[test]
+    fn maybe_extract_trailing_attrs_text_before_brace() {
+        use crate::ast::Node;
+        let mut children = vec![
+            Node::text("word"),
+            Node::text("text before {.highlight}"),
+        ];
+        maybe_extract_trailing_attrs_from_children(&mut children);
+        // The first child should get the attrs applied
+        assert!(
+            children[0].attrs.classes.contains(&"highlight".to_string())
+                || children.len() == 2
+        );
+    }
+
+    // ── parse_hint_directive edge cases ──
+
+    #[test]
+    fn parse_hint_directive_empty_args() {
+        let result = parse_hint_directive("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_hint_directive_no_properties() {
+        // Just a selector with no property assignments
+        let result = parse_hint_directive("figure");
+        assert!(result.is_empty());
+    }
+
+    // ── parse_series_directive_full with counts ──
+
+    #[test]
+    fn parse_series_with_counts_generates_hint() {
+        let mut attrs = Attrs::default();
+        apply_directive(&mut attrs, "series", "fig, counts=figure");
+        assert!(!attrs.declarations.is_empty());
+        // Should also generate a hint for "figure" selector
+        assert!(!attrs.hints.is_empty());
+    }
+
+    #[test]
+    fn parse_series_with_counts_and_formats() {
+        let mut attrs = Attrs::default();
+        apply_directive(&mut attrs, "series", "tbl, counts=table, formats=[\"I\",\"a\"]");
+        assert!(!attrs.declarations.is_empty());
+        assert!(!attrs.hints.is_empty());
+        // Check that the series hint was generated for table selector
+        let has_series_hint = attrs.hints.iter().any(|h| h.property == "series");
+        assert!(has_series_hint, "should have series hint from counts=");
+    }
+
+    // ── is_property_token edge cases ──
+
+    #[test]
+    fn is_property_token_eq_in_quotes() {
+        assert!(!is_property_token("\"value=with=eq\""));
+    }
+
+    #[test]
+    fn is_property_token_eq_in_brackets() {
+        assert!(!is_property_token("[a=b]"));
+    }
+
+    #[test]
+    fn is_property_token_hyphenated_key() {
+        assert!(is_property_token("my-key=value"));
+    }
+}

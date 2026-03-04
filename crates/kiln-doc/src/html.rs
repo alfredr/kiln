@@ -757,4 +757,728 @@ mod tests {
         assert!(!html.contains("preview-block"));
         assert!(html.contains("<div>hello</div>"));
     }
+
+    // ── Table rendering ──
+
+    #[test]
+    fn table_thead_tbody() {
+        let html = render("| H1 | H2 |\n|---|---|\n| a | b |\n| c | d |");
+        assert!(html.contains("<thead>"), "table should have thead");
+        assert!(html.contains("<tbody>"), "table should have tbody");
+        assert!(html.contains("<th>"), "header cells should be th");
+        assert!(html.contains("<td>"), "body cells should be td");
+        assert!(html.contains("</table>"));
+    }
+
+    #[test]
+    fn table_header_only() {
+        // Table with just a header and separator, no body rows
+        let html = render("| H1 | H2 |\n|---|---|");
+        assert!(html.contains("<thead>"));
+        assert!(html.contains("<th>"));
+        assert!(!html.contains("<tbody>"), "no body rows means no tbody");
+    }
+
+    #[test]
+    fn table_alignment() {
+        let html = render("| L | C | R |\n|:---|:---:|---:|\n| a | b | c |");
+        assert!(html.contains("<table"));
+        assert!(html.contains("<thead>"));
+        assert!(html.contains("<tbody>"));
+    }
+
+    // ── Ordered list start ──
+
+    #[test]
+    fn ordered_list_custom_start() {
+        let html = render("5. fifth\n6. sixth");
+        assert!(
+            html.contains("start=\"5\""),
+            "ordered list with start=5 should have start attr: {html}"
+        );
+    }
+
+    #[test]
+    fn ordered_list_start_one_no_attr() {
+        let html = render("1. first\n2. second");
+        assert!(
+            !html.contains("start="),
+            "ordered list starting at 1 should not have start attr: {html}"
+        );
+    }
+
+    // ── Math with ID ──
+
+    #[test]
+    fn math_display_with_id() {
+        let html = render("$$ {#my-eq}\nE=mc^2\n$$");
+        assert!(html.contains("class=\"math display\""));
+        // Display math should contain the math content
+        assert!(html.contains("E=mc^2") || html.contains("E&#x3D;mc^2"));
+    }
+
+    // ── Figure and caption ──
+
+    #[test]
+    fn figure_with_caption_text() {
+        let html = render("![My caption](img.png)");
+        assert!(html.contains("<figure"));
+        assert!(html.contains("<figcaption>"));
+        assert!(html.contains("My caption"));
+        assert!(html.contains("<img"));
+        assert!(html.contains("</figure>"));
+    }
+
+    #[test]
+    fn figure_with_id_and_class() {
+        let html = render("![Alt](img.png){#fig:test .wide}");
+        assert!(html.contains("id=\"fig:test\""));
+        assert!(html.contains("class=\"wide\""));
+    }
+
+    #[test]
+    fn image_no_alt_no_caption() {
+        let html = render("![](img.png)");
+        assert!(html.contains("<figure"));
+        assert!(html.contains("<img"));
+        // No alt text = no figcaption
+        assert!(!html.contains("<figcaption>"), "empty alt should not produce figcaption: {html}");
+    }
+
+    // ── Code block variations ──
+
+    #[test]
+    fn code_block_no_lang() {
+        let html = render("```\nplain code\n```");
+        assert!(html.contains("<pre>"));
+        assert!(html.contains("<code>"));
+        assert!(!html.contains("language-"), "no lang should mean no language- class: {html}");
+    }
+
+    #[test]
+    fn code_block_unknown_lang() {
+        let html = render("```zzzz_nonexistent\nsome code\n```");
+        assert!(html.contains("<pre>"));
+        assert!(html.contains("language-zzzz_nonexistent"));
+        // Falls back to escaped (no highlighting), should still contain code text
+        assert!(html.contains("some code"));
+    }
+
+    #[test]
+    fn code_block_with_id_and_class() {
+        let html = render("```{rust #my-code .highlight}\nfn main() {}\n```");
+        assert!(html.contains("id=\"my-code\""));
+        assert!(html.contains("highlight"));
+    }
+
+    // ── Cross-ref rendering ──
+
+    #[test]
+    fn cross_ref_with_resolved_text() {
+        reset_id_counter();
+        let mut doc = parse("{@series(fig, counts=figure)}\n{@hint(figure, label=\"Figure {n}\")}\n\n![Pic](a.png){#fig:pic}\n\nSee @fig:pic.").unwrap();
+        crate::resolve::resolve_document(&mut doc);
+        let html = render_html(&doc);
+        assert!(html.contains("Figure 1"), "resolved cross-ref should show label: {html}");
+        assert!(html.contains("href=\"#fig:pic\""));
+    }
+
+    // ── Other rendering ──
+
+    #[test]
+    fn hard_break_renders() {
+        let html = render("line one  \nline two");
+        assert!(html.contains("<br>"));
+    }
+
+    #[test]
+    fn emphasis_wraps_content() {
+        let html = render("*emphasized text*");
+        assert!(html.contains("<em>"));
+        assert!(html.contains("emphasized text"));
+    }
+
+    #[test]
+    fn multiple_paragraphs() {
+        let html = render("First para.\n\nSecond para.");
+        // Count <p> occurrences
+        let p_count = html.matches("<p>").count();
+        assert!(p_count >= 2, "should have at least 2 paragraphs: {html}");
+    }
+
+    #[test]
+    fn section_nesting() {
+        let html = render("# Top\n\n## Sub\n\nContent.");
+        assert!(html.contains("<section"));
+        assert!(html.contains("<h1"));
+        assert!(html.contains("<h2"));
+    }
+
+    #[test]
+    fn raw_block_fallback_with_id() {
+        let html = render("```{=typst #my-block}\n#rect()\n```");
+        assert!(html.contains("id=\"my-block\""));
+        assert!(html.contains("data-format=\"typst\""));
+    }
+
+    #[test]
+    fn tilde_fence_renders() {
+        let html = render("~~~python\nprint('hello')\n~~~");
+        assert!(html.contains("<pre"));
+        assert!(html.contains("language-python"));
+    }
+
+    #[test]
+    fn blockquote_with_nested_content() {
+        let html = render("> Line one\n> Line two");
+        assert!(html.contains("<blockquote"));
+        assert!(html.contains("</blockquote>"));
+    }
+
+    #[test]
+    fn unordered_list_structure() {
+        let html = render("- item a\n- item b\n- item c");
+        assert!(html.contains("<ul"));
+        let li_count = html.matches("<li").count();
+        assert_eq!(li_count, 3);
+    }
+
+    // ── Direct AST rendering tests ──
+
+    #[test]
+    fn render_cross_ref_with_properties() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut r = Node::cross_ref("fig:test");
+        r.attrs.properties.insert("text".to_string(), Value::Text("Figure 1".to_string()));
+        r.attrs.properties.insert("href".to_string(), Value::Text("#fig:test".to_string()));
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::paragraph(vec![r])]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("Figure 1"), "should show resolved text: {html}");
+        assert!(html.contains("href=\"#fig:test\""));
+    }
+
+    #[test]
+    fn render_math_display_with_explicit_id() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let mut math = Node::math(true, "x^2");
+        math.attrs.id = "eq:one".to_string();
+        math.attrs.auto_id = false;
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![math]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("id=\"eq:one\""), "explicit ID should appear: {html}");
+        assert!(html.contains("math display"));
+    }
+
+    #[test]
+    fn render_code_block_no_lang() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let code = Node::code_block("", "plain code");
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![code]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<pre>"));
+        assert!(html.contains("<code>"));
+        assert!(!html.contains("language-"), "empty lang should not have language class: {html}");
+    }
+
+    #[test]
+    fn render_soft_break() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let para = Node::paragraph(vec![
+            Node::text("line1"),
+            Node::soft_break(),
+            Node::text("line2"),
+        ]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![para]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("line1\nline2"), "soft break should be newline: {html}");
+    }
+
+    #[test]
+    fn render_hard_break() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let para = Node::paragraph(vec![
+            Node::text("line1"),
+            Node::hard_break(),
+            Node::text("line2"),
+        ]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![para]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<br>"));
+    }
+
+    #[test]
+    fn render_file_scope_transparent() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let fs = Node::file_scope("test.md", vec![Node::paragraph(vec![Node::text("content")])]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![fs]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("content"));
+    }
+
+    #[test]
+    fn render_raw_block_compiled_no_attrs() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<div>compiled</div>".to_string()));
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<div>compiled</div>"));
+        // No wrapper div since no user attrs
+        assert!(!html.contains("data-format"));
+    }
+
+    #[test]
+    fn render_raw_block_compiled_with_class() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<span>out</span>".to_string()));
+        raw.attrs.classes.push("center".to_string());
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<div class=\"center\">"));
+        assert!(html.contains("<span>out</span>"));
+    }
+
+    #[test]
+    fn render_raw_block_compile_error() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compile_error".to_string(), Value::Text("some error".to_string()));
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("raw-error"));
+        assert!(html.contains("some error"));
+    }
+
+    #[test]
+    fn render_table_ast() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let header = Node::table_row(vec![
+            Node::table_cell(vec![Node::text("H1")]),
+            Node::table_cell(vec![Node::text("H2")]),
+        ]);
+        let row = Node::table_row(vec![
+            Node::table_cell(vec![Node::text("a")]),
+            Node::table_cell(vec![Node::text("b")]),
+        ]);
+        let table = Node::table(vec![header, row]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![table]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<thead>"), "should have thead: {html}");
+        assert!(html.contains("<th>H1</th>"));
+        assert!(html.contains("<th>H2</th>"));
+        assert!(html.contains("<tbody>"));
+        assert!(html.contains("<td>a</td>"));
+        assert!(html.contains("</table>"));
+    }
+
+    #[test]
+    fn render_ordered_list_start() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let items = vec![
+            Node::list_item(vec![Node::paragraph(vec![Node::text("fifth")])]),
+            Node::list_item(vec![Node::paragraph(vec![Node::text("sixth")])]),
+        ];
+        let list = Node::list(true, Some(5), items);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![list]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("start=\"5\""), "should have start=5: {html}");
+    }
+
+    #[test]
+    fn render_blockquote_ast() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let bq = Node::blockquote(vec![Node::paragraph(vec![Node::text("quoted")])]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![bq]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<blockquote>"));
+        assert!(html.contains("quoted"));
+    }
+
+    #[test]
+    fn render_citation_ast() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let cite = Node::citation("knuth");
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::paragraph(vec![cite])]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<cite"));
+        assert!(html.contains("data-key=\"knuth\""));
+        assert!(html.contains("[knuth]"));
+    }
+
+    #[test]
+    fn render_image_with_explicit_id() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let mut img = Node::image("pic.png", "alt text");
+        img.attrs.id = "my-img".to_string();
+        img.attrs.auto_id = false;
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::paragraph(vec![img])]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("id=\"my-img\""));
+        assert!(html.contains("src=\"pic.png\""));
+    }
+
+    #[test]
+    fn escape_html_chars() {
+        let html = render("Use `<div>` & things with > sign.");
+        assert!(html.contains("&amp;"));
+        assert!(html.contains("&gt;"));
+    }
+
+    #[test]
+    fn render_link_ast() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let link = Node::link("https://example.com", vec![Node::text("click")]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::paragraph(vec![link])]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<a href=\"https://example.com\">"));
+        assert!(html.contains("click"));
+        assert!(html.contains("</a>"));
+    }
+
+    #[test]
+    fn render_heading_level_clamp() {
+        use crate::ast::Node;
+        reset_id_counter();
+        // Level 7 heading (doesn't exist in HTML) should clamp to h6
+        let h = Node::heading(7, vec![Node::text("Deep")]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::section(7, vec![h])]),
+        };
+        let html = render_html(&doc);
+        // min(7, 6) = 6
+        assert!(html.contains("<h6"));
+    }
+
+    #[test]
+    fn render_multiple_classes() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let mut para = Node::paragraph(vec![Node::text("styled")]);
+        para.attrs.classes = vec!["a".to_string(), "b".to_string()];
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![para]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("class=\"a b\""), "should join classes with space: {html}");
+    }
+
+    #[test]
+    fn render_thematic_break() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![
+                Node::paragraph(vec![Node::text("above")]),
+                Node::thematic_break(),
+                Node::paragraph(vec![Node::text("below")]),
+            ]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<hr>"));
+    }
+
+    // ── Preview block rendering ──
+
+    #[test]
+    fn render_preview_block_compiled() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut cb = Node::code_block("typst", "#rect()");
+        cb.attrs.properties.insert("preview".to_string(), Value::Bool(true));
+        cb.attrs.properties.insert("compiled".to_string(), Value::Text("<div>rect</div>".to_string()));
+        cb.attrs.id = "prev-1".to_string();
+        cb.attrs.auto_id = false;
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![cb]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("preview-block"), "should have preview-block class: {html}");
+        assert!(html.contains("preview-tab-input"), "should have tab inputs");
+        assert!(html.contains("Preview</label>"), "should have Preview tab label");
+        assert!(html.contains("Source</label>"), "should have Source tab label");
+        assert!(html.contains("<div>rect</div>"), "should contain compiled output");
+        assert!(html.contains("preview-output"), "should have preview output panel");
+        assert!(html.contains("preview-source"), "should have preview source panel");
+        assert!(html.contains("id=\"prev-1\""), "should have explicit id");
+    }
+
+    #[test]
+    fn render_preview_block_auto_id_no_id_attr() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut cb = Node::code_block("typst", "#circle()");
+        cb.attrs.properties.insert("preview".to_string(), Value::Bool(true));
+        cb.attrs.properties.insert("compiled".to_string(), Value::Text("<svg/>".to_string()));
+        // auto_id = true (default), so wrapper div should NOT have id= attribute
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![cb]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("preview-block"));
+        // The wrapper div should not have an explicit id attribute
+        assert!(html.contains("<div class=\"preview-block\">"), "auto-id wrapper should not have id attr: {html}");
+    }
+
+    #[test]
+    fn render_preview_block_no_compiled_falls_back() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut cb = Node::code_block("typst", "#line()");
+        cb.attrs.properties.insert("preview".to_string(), Value::Bool(true));
+        // No "compiled" property → falls back to code block
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![cb]),
+        };
+        let html = render_html(&doc);
+        assert!(!html.contains("preview-block"), "should fall back to code block");
+        assert!(html.contains("<pre"), "should render as code block");
+    }
+
+    // ── Raw block with compiled + user attrs ──
+
+    #[test]
+    fn render_raw_block_compiled_with_user_attrs() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<div>output</div>".to_string()));
+        raw.attrs.classes = vec!["typst".to_string()];
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("class=\"typst\""), "should wrap with user class: {html}");
+        assert!(html.contains("<div>output</div>"), "should contain compiled output");
+    }
+
+    #[test]
+    fn render_raw_block_compiled_with_explicit_id() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<p>ok</p>".to_string()));
+        raw.attrs.id = "my-block".to_string();
+        raw.attrs.auto_id = false;
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("id=\"my-block\""), "should have explicit id");
+    }
+
+    #[test]
+    fn render_raw_block_compiled_with_extra_property() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#rect()");
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<p>ok</p>".to_string()));
+        raw.attrs.properties.insert("custom-key".to_string(), Value::Text("val".to_string()));
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        // Has user property (custom-key) → should wrap in div
+        assert!(html.contains("<div"), "should wrap in div: {html}");
+    }
+
+    // ── Table rendering through parse ──
+
+    #[test]
+    fn render_table_full_pipeline() {
+        let html = render("| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |");
+        assert!(html.contains("<thead>"));
+        assert!(html.contains("<th>A</th>"));
+        assert!(html.contains("<th>B</th>"));
+        assert!(html.contains("<tbody>"));
+        assert!(html.contains("<td>1</td>"));
+        assert!(html.contains("<td>2</td>"));
+        assert!(html.contains("<td>3</td>"));
+        assert!(html.contains("<td>4</td>"));
+        assert!(html.contains("</table>"));
+    }
+
+    // ── Syntax highlighting ──
+
+    #[test]
+    fn render_code_block_with_known_lang() {
+        // "rust" is in syntect's default set, should produce highlighted output
+        let html = render("```rust\nfn main() {}\n```");
+        assert!(html.contains("language-rust"), "should have language class: {html}");
+        assert!(html.contains("<code"), "should have code element");
+        assert!(html.contains("<pre"), "should have pre element");
+    }
+
+    // ── Escape functions ──
+
+    #[test]
+    fn escape_html_all_specials() {
+        let result = escape_html("a & b < c > d");
+        assert_eq!(result, "a &amp; b &lt; c &gt; d");
+    }
+
+    #[test]
+    fn escape_html_no_specials() {
+        let result = escape_html("hello world");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn escape_attr_all_specials() {
+        let result = escape_attr("a & b < c > d \"e\"");
+        assert_eq!(result, "a &amp; b &lt; c &gt; d &quot;e&quot;");
+    }
+
+    // ── Cross-ref with non-text property value ──
+
+    #[test]
+    fn render_cross_ref_non_text_href() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut cr = Node::cross_ref("target");
+        // Set href to a non-Text value to exercise the `_ => None` branch
+        cr.attrs.properties.insert("href".to_string(), Value::Number(42.0));
+        cr.attrs.properties.insert("text".to_string(), Value::Number(99.0));
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![Node::paragraph(vec![cr])]),
+        };
+        let html = render_html(&doc);
+        // Falls back to default href=#target and text=target
+        assert!(html.contains("href=\"#target\""), "should use default href: {html}");
+        assert!(html.contains(">target</a>"), "should use target as text: {html}");
+    }
+
+    // ── RawBlock preview rendering ──
+
+    #[test]
+    fn render_raw_block_preview_compiled() {
+        use crate::ast::{Node, Value};
+        reset_id_counter();
+        let mut raw = Node::raw_block("typst", "#line()");
+        raw.attrs.properties.insert("preview".to_string(), Value::Bool(true));
+        raw.attrs.properties.insert("compiled".to_string(), Value::Text("<hr/>".to_string()));
+        raw.attrs.id = "rb-prev".to_string();
+        raw.attrs.auto_id = false;
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![raw]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("preview-block"), "should render preview block");
+        assert!(html.contains("<hr/>"), "should contain compiled output");
+    }
+
+    // ── Ordered list start=1 ──
+
+    #[test]
+    fn render_ordered_list_start_one_no_start_attr() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let items = vec![
+            Node::list_item(vec![Node::paragraph(vec![Node::text("a")])]),
+        ];
+        let list = Node::list(true, Some(1), items);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![list]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("<ol"), "should be ordered list");
+        assert!(!html.contains("start="), "start=1 should be omitted");
+    }
+
+    // ── Caption, strikethrough, custom node ──
+
+    #[test]
+    fn render_strikethrough() {
+        let html = render("~~deleted~~");
+        assert!(html.contains("<del>"));
+        assert!(html.contains("deleted"));
+        assert!(html.contains("</del>"));
+    }
+
+    #[test]
+    fn render_custom_node_transparent() {
+        use crate::ast::Node;
+        reset_id_counter();
+        let custom = Node::new(crate::ast::NodeKind::Custom {
+            content_type: "test".to_string(),
+        }).with_children(vec![Node::paragraph(vec![Node::text("inner")])]);
+        let doc = crate::ast::Document {
+            meta: crate::ast::Metadata::default(),
+            content: Node::section(0, vec![custom]),
+        };
+        let html = render_html(&doc);
+        assert!(html.contains("inner"), "custom node should render children transparently");
+    }
 }

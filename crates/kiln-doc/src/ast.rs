@@ -723,4 +723,324 @@ mod tests {
         assert_eq!(NumberFormat::AlphaUpper.render(3), "C");
         assert_eq!(NumberFormat::AlphaLower.render(3), "c");
     }
+
+    // ── Node constructor tests ──
+
+    #[test]
+    fn node_text_constructor() {
+        let n = Node::text("hello");
+        assert!(matches!(n.kind, NodeKind::Text(ref s) if s == "hello"));
+        assert!(n.attrs.auto_id);
+        assert!(n.children.is_empty());
+    }
+
+    #[test]
+    fn node_code_constructor() {
+        let n = Node::code("x + 1");
+        assert!(matches!(n.kind, NodeKind::Code(ref s) if s == "x + 1"));
+    }
+
+    #[test]
+    fn node_code_block_constructor() {
+        let n = Node::code_block("rust", "fn main() {}");
+        assert!(matches!(n.kind, NodeKind::CodeBlock { ref lang, ref source } if lang == "rust" && source == "fn main() {}"));
+    }
+
+    #[test]
+    fn node_raw_block_constructor() {
+        let n = Node::raw_block("typst", "#rect()");
+        assert!(matches!(n.kind, NodeKind::RawBlock { ref format, ref source } if format == "typst" && source == "#rect()"));
+    }
+
+    #[test]
+    fn node_math_constructors() {
+        let inline = Node::math(false, "E=mc^2");
+        assert!(matches!(inline.kind, NodeKind::Math { display: false, ref source } if source == "E=mc^2"));
+        let display = Node::math(true, "\\sum_i x_i");
+        assert!(matches!(display.kind, NodeKind::Math { display: true, .. }));
+    }
+
+    #[test]
+    fn node_break_constructors() {
+        let soft = Node::soft_break();
+        assert!(matches!(soft.kind, NodeKind::SoftBreak));
+        let hard = Node::hard_break();
+        assert!(matches!(hard.kind, NodeKind::HardBreak));
+        let hr = Node::thematic_break();
+        assert!(matches!(hr.kind, NodeKind::ThematicBreak));
+    }
+
+    #[test]
+    fn node_section_constructor() {
+        let children = vec![Node::text("child")];
+        let sec = Node::section(2, children);
+        assert!(matches!(sec.kind, NodeKind::Section { level: 2 }));
+        assert_eq!(sec.children.len(), 1);
+    }
+
+    #[test]
+    fn node_heading_constructor() {
+        let h = Node::heading(3, vec![Node::text("Title")]);
+        assert!(matches!(h.kind, NodeKind::Heading { level: 3 }));
+        assert_eq!(h.children.len(), 1);
+    }
+
+    #[test]
+    fn node_paragraph_constructor() {
+        let p = Node::paragraph(vec![Node::text("hello")]);
+        assert!(matches!(p.kind, NodeKind::Paragraph));
+    }
+
+    #[test]
+    fn node_blockquote_constructor() {
+        let bq = Node::blockquote(vec![Node::paragraph(vec![Node::text("quoted")])]);
+        assert!(matches!(bq.kind, NodeKind::BlockQuote));
+        assert_eq!(bq.children.len(), 1);
+    }
+
+    #[test]
+    fn node_list_constructors() {
+        let ul = Node::list(false, None, vec![Node::list_item(vec![Node::text("a")])]);
+        assert!(matches!(ul.kind, NodeKind::List { ordered: false, start: None }));
+
+        let ol = Node::list(true, Some(5), vec![Node::list_item(vec![Node::text("b")])]);
+        assert!(matches!(ol.kind, NodeKind::List { ordered: true, start: Some(5) }));
+    }
+
+    #[test]
+    fn node_figure_caption_constructors() {
+        let fig = Node::figure(vec![]);
+        assert!(matches!(fig.kind, NodeKind::Figure));
+        let cap = Node::caption(vec![Node::text("Caption text")]);
+        assert!(matches!(cap.kind, NodeKind::Caption));
+    }
+
+    #[test]
+    fn node_emphasis_strong_strikethrough() {
+        let em = Node::emphasis(vec![Node::text("em")]);
+        assert!(matches!(em.kind, NodeKind::Emphasis));
+        let strong = Node::strong(vec![Node::text("bold")]);
+        assert!(matches!(strong.kind, NodeKind::Strong));
+        let del = Node::strikethrough(vec![Node::text("del")]);
+        assert!(matches!(del.kind, NodeKind::Strikethrough));
+    }
+
+    #[test]
+    fn node_link_constructor() {
+        let a = Node::link("https://example.com", vec![Node::text("click")]);
+        assert!(matches!(a.kind, NodeKind::Link { ref url } if url == "https://example.com"));
+        assert_eq!(a.children.len(), 1);
+    }
+
+    #[test]
+    fn node_image_constructor() {
+        let img = Node::image("img.png", "Alt text");
+        assert!(matches!(img.kind, NodeKind::Image { ref url, ref alt } if url == "img.png" && alt == "Alt text"));
+    }
+
+    #[test]
+    fn node_citation_constructor() {
+        let cite = Node::citation("knuth");
+        assert!(matches!(cite.kind, NodeKind::Citation { ref key } if key == "knuth"));
+    }
+
+    #[test]
+    fn node_cross_ref_constructor() {
+        let r = Node::cross_ref("fig:arch");
+        assert!(matches!(r.kind, NodeKind::CrossRef { ref target } if target == "fig:arch"));
+    }
+
+    #[test]
+    fn node_table_constructors() {
+        let cell = Node::table_cell(vec![Node::text("data")]);
+        assert!(matches!(cell.kind, NodeKind::TableCell));
+        let row = Node::table_row(vec![cell]);
+        assert!(matches!(row.kind, NodeKind::TableRow));
+        let table = Node::table(vec![row]);
+        assert!(matches!(table.kind, NodeKind::Table));
+    }
+
+    #[test]
+    fn node_file_scope_constructor() {
+        let fs = Node::file_scope("main.md", vec![Node::text("content")]);
+        assert!(matches!(fs.kind, NodeKind::FileScope { ref source } if source == "main.md"));
+    }
+
+    // ── Builder methods ──
+
+    #[test]
+    fn node_with_id() {
+        let n = Node::paragraph(vec![]).with_id("custom-id");
+        assert_eq!(n.attrs.id, "custom-id");
+    }
+
+    #[test]
+    fn node_with_classes() {
+        let n = Node::paragraph(vec![]).with_classes(vec!["a".into(), "b".into()]);
+        assert_eq!(n.attrs.classes, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn node_with_children() {
+        let n = Node::paragraph(vec![]).with_children(vec![Node::text("x"), Node::text("y")]);
+        assert_eq!(n.children.len(), 2);
+    }
+
+    // ── Attrs ──
+
+    #[test]
+    fn attrs_new_has_auto_id() {
+        let a = Attrs::new("test-id".into());
+        assert_eq!(a.id, "test-id");
+        assert!(a.auto_id);
+        assert!(a.classes.is_empty());
+        assert!(a.properties.is_empty());
+    }
+
+    #[test]
+    fn attrs_default_generates_id() {
+        reset_id_counter();
+        let a = Attrs::default();
+        assert!(a.id.starts_with("node-"));
+        assert!(a.auto_id);
+    }
+
+    // ── Metadata ──
+
+    #[test]
+    fn metadata_default() {
+        let m = Metadata::default();
+        assert!(m.title.is_none());
+        assert!(m.date.is_none());
+        assert!(m.tags.is_empty());
+        assert!(m.summary.is_none());
+        assert!(!m.draft);
+        assert!(m.slug.is_none());
+    }
+
+    // ── Value variants ──
+
+    #[test]
+    fn value_text() {
+        let v = Value::Text("hello".into());
+        assert!(matches!(v, Value::Text(s) if s == "hello"));
+    }
+
+    #[test]
+    fn value_number() {
+        let v = Value::Number(2.5);
+        assert!(matches!(v, Value::Number(n) if (n - 2.5).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn value_bool() {
+        let v = Value::Bool(true);
+        assert!(matches!(v, Value::Bool(true)));
+    }
+
+    #[test]
+    fn value_length() {
+        let v = Value::Length(Length { value: 10.0, unit: LengthUnit::Px });
+        assert!(matches!(v, Value::Length(Length { unit: LengthUnit::Px, .. })));
+    }
+
+    #[test]
+    fn value_spacing() {
+        let v = Value::Spacing(Spacing::Auto);
+        assert!(matches!(v, Value::Spacing(Spacing::Auto)));
+        let v2 = Value::Spacing(Spacing::Flex { grow: 1.0 });
+        assert!(matches!(v2, Value::Spacing(Spacing::Flex { grow }) if grow == 1.0));
+    }
+
+    #[test]
+    fn value_list() {
+        let v = Value::List(vec![Value::Number(1.0), Value::Text("x".into())]);
+        if let Value::List(items) = v {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected List");
+        }
+    }
+
+    #[test]
+    fn value_map() {
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), Value::Bool(true));
+        let v = Value::Map(m);
+        if let Value::Map(map) = v {
+            assert!(matches!(map.get("key"), Some(Value::Bool(true))));
+        } else {
+            panic!("expected Map");
+        }
+    }
+
+    // ── SeriesConfig ──
+
+    #[test]
+    fn series_config_defaults() {
+        let sc = SeriesConfig {
+            parent: None,
+            formats: vec!["1".to_string()],
+            cycle: false,
+        };
+        assert!(sc.parent.is_none());
+        assert_eq!(sc.formats.len(), 1);
+        assert!(!sc.cycle);
+    }
+
+    // ── CombinatorOp ──
+
+    #[test]
+    fn combinator_op_token_len() {
+        assert_eq!(CombinatorOp::Child.token_len(), 1);
+        assert_eq!(CombinatorOp::Descendant.token_len(), 2);
+    }
+
+    // ── ID generation ──
+
+    #[test]
+    fn reset_id_counter_works() {
+        reset_id_counter();
+        let a = Attrs::default();
+        assert!(a.id.contains("-0"), "first ID after reset should be -0: {}", a.id);
+        let b = Attrs::default();
+        assert!(b.id.contains("-1"), "second ID should be -1: {}", b.id);
+        reset_id_counter();
+        let c = Attrs::default();
+        assert!(c.id.contains("-0"), "after re-reset should be -0 again: {}", c.id);
+    }
+
+    // ── Roman numeral edge cases ──
+
+    #[test]
+    fn to_roman_large() {
+        assert_eq!(to_roman(3999, true), "MMMCMXCIX");
+    }
+
+    #[test]
+    fn to_alpha_edge_cases() {
+        assert_eq!(to_alpha(26, true), "Z");
+        assert_eq!(to_alpha(26, false), "z");
+        // Wraps at 27
+        assert_eq!(to_alpha(52, true), "Z");
+        assert_eq!(to_alpha(53, true), "A");
+    }
+
+    // ── FormatToken additional tests ──
+
+    #[test]
+    fn format_token_render_all_formats() {
+        assert_eq!(FormatToken::parse("1").render(10), "10");
+        assert_eq!(FormatToken::parse("I").render(10), "X");
+        assert_eq!(FormatToken::parse("i").render(10), "x");
+        assert_eq!(FormatToken::parse("A").render(10), "J");
+        assert_eq!(FormatToken::parse("a").render(10), "j");
+    }
+
+    #[test]
+    fn format_token_whitespace_trimmed() {
+        let t = FormatToken::parse("  1  ");
+        assert!(matches!(t.format, NumberFormat::Arabic));
+    }
 }
