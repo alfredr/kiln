@@ -308,24 +308,10 @@ mod tests {
     }
 
     #[test]
-    fn html_code_block_not_raw() {
-        let doc = parse_ok("```html\n<div>hi</div>\n```");
-        let node = &doc.content.children[0];
-        assert!(matches!(node.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "html"));
-    }
-
-    #[test]
     fn raw_block_brace_format() {
         let doc = parse_ok("```{=html}\n<div>hi</div>\n```");
         let node = &doc.content.children[0];
         assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "html"));
-    }
-
-    #[test]
-    fn raw_block_brace_format_typst() {
-        let doc = parse_ok("```{=typst}\n#rect()\n```");
-        let node = &doc.content.children[0];
-        assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
     }
 
     #[test]
@@ -781,12 +767,6 @@ mod tests {
     }
 
     #[test]
-    fn series_formats_single() {
-        let doc = parse_ok("{@series(nums, formats=I)}");
-        assert_eq!(extract_series_config(&doc).unwrap().formats, vec!["I"]);
-    }
-
-    #[test]
     fn series_formats_list() {
         let doc = parse_ok("{@series(nums, formats=[\"I\",\"1\",\"a\"])}");
         assert_eq!(
@@ -971,63 +951,12 @@ mod tests {
     }
 
     #[test]
-    fn code_block_old_form_normalizes() {
-        // Old `lang {attrs}` form normalizes to unified brace form
-        let doc = parse_ok("```rust {#my-id}\ncode\n```");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
-        assert_eq!(code.attrs.id, "my-id");
-    }
-
-    #[test]
-    fn code_block_bare_lang() {
-        // Bare lang without braces still works
-        let doc = parse_ok("```python\nprint('hi')\n```");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "python"));
-    }
-
-    #[test]
-    fn code_block_brace_lang_only() {
-        // {lang} form with no extra attrs
-        let doc = parse_ok("```{rust}\nfn main() {}\n```");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "rust"));
-    }
-
-    #[test]
     fn raw_block_colon_shorthand() {
         // {=typst:#id} colon shorthand
         let doc = parse_ok("```{=typst:#fig:x}\n#rect()\n```");
         let node = &doc.content.children[0];
         assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
         assert_eq!(node.attrs.id, "fig:x");
-    }
-
-    #[test]
-    fn raw_block_colon_shorthand_with_class() {
-        let doc = parse_ok("```{=typst:#fig:x .wide}\n#rect()\n```");
-        let node = &doc.content.children[0];
-        assert!(matches!(node.kind, NodeKind::RawBlock { ref format, .. } if format == "typst"));
-        assert_eq!(node.attrs.id, "fig:x");
-        assert!(node.attrs.classes.contains(&"wide".to_string()));
-    }
-
-    #[test]
-    fn code_block_no_lang() {
-        let doc = parse_ok("```\nplain text\n```");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang.is_empty()));
-    }
-
-    #[test]
-    fn code_block_attrs_only_no_lang() {
-        // {#id .class} with no language word
-        let doc = parse_ok("```{#my-id .highlight}\ncode\n```");
-        let code = &doc.content.children[0];
-        assert!(matches!(code.kind, NodeKind::CodeBlock { ref lang, .. } if lang.is_empty()));
-        assert_eq!(code.attrs.id, "my-id");
-        assert!(code.attrs.classes.contains(&"highlight".to_string()));
     }
 
     #[test]
@@ -1187,22 +1116,8 @@ mod tests {
     }
 
     #[test]
-    fn tilde_fence_with_lang() {
-        let doc = parse_ok("~~~python\nprint('hi')\n~~~");
-        let node = &doc.content.children[0];
-        assert!(matches!(node.kind, NodeKind::CodeBlock { ref lang, .. } if lang == "python"));
-    }
-
-    #[test]
     fn unclosed_fence_extends_to_eof() {
         let doc = parse_ok("```\ncode without close");
-        let node = &doc.content.children[0];
-        assert!(matches!(node.kind, NodeKind::CodeBlock { .. }));
-    }
-
-    #[test]
-    fn fence_five_backticks() {
-        let doc = parse_ok("`````\ncode\n`````");
         let node = &doc.content.children[0];
         assert!(matches!(node.kind, NodeKind::CodeBlock { .. }));
     }

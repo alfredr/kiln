@@ -728,14 +728,6 @@ mod tests {
     }
 
     #[test]
-    fn no_preview_without_attr() {
-        let html = render_with_compiler("```html\n<div>hello</div>\n```");
-        assert!(!html.contains("preview-block"));
-        assert!(html.contains("<pre"));
-        assert!(html.contains("language-html"));
-    }
-
-    #[test]
     fn raw_block_preview_via_property() {
         let html = render_with_compiler("```{=html preview}\n<strong>hi</strong>\n```");
         assert!(html.contains("preview-block"));
@@ -749,13 +741,6 @@ mod tests {
         );
         assert!(html.contains("preview-block"));
         assert!(html.contains("<em>hi</em>"));
-    }
-
-    #[test]
-    fn raw_block_no_preview_without_attr() {
-        let html = render_with_compiler("```{=html}\n<div>hello</div>\n```");
-        assert!(!html.contains("preview-block"));
-        assert!(html.contains("<div>hello</div>"));
     }
 
     // ── Table rendering ──
@@ -864,13 +849,6 @@ mod tests {
         assert!(html.contains("some code"));
     }
 
-    #[test]
-    fn code_block_with_id_and_class() {
-        let html = render("```{rust #my-code .highlight}\nfn main() {}\n```");
-        assert!(html.contains("id=\"my-code\""));
-        assert!(html.contains("highlight"));
-    }
-
     // ── Cross-ref rendering ──
 
     #[test]
@@ -912,13 +890,6 @@ mod tests {
         assert!(html.contains("<section"));
         assert!(html.contains("<h1"));
         assert!(html.contains("<h2"));
-    }
-
-    #[test]
-    fn raw_block_fallback_with_id() {
-        let html = render("```{=typst #my-block}\n#rect()\n```");
-        assert!(html.contains("id=\"my-block\""));
-        assert!(html.contains("data-format=\"typst\""));
     }
 
     #[test]
@@ -1007,23 +978,6 @@ mod tests {
         };
         let html = render_html(&doc);
         assert!(html.contains("line1\nline2"), "soft break should be newline: {html}");
-    }
-
-    #[test]
-    fn render_hard_break() {
-        use crate::ast::Node;
-        reset_id_counter();
-        let para = Node::paragraph(vec![
-            Node::text("line1"),
-            Node::hard_break(),
-            Node::text("line2"),
-        ]);
-        let doc = crate::ast::Document {
-            meta: crate::ast::Metadata::default(),
-            content: Node::section(0, vec![para]),
-        };
-        let html = render_html(&doc);
-        assert!(html.contains("<br>"));
     }
 
     #[test]

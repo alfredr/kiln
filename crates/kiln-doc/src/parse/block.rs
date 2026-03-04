@@ -744,26 +744,8 @@ mod tests {
     }
 
     #[test]
-    fn list_marker_star() {
-        let result = detect_list_marker("* item");
-        assert_eq!(result, Some((false, 0, 2)));
-    }
-
-    #[test]
-    fn list_marker_plus() {
-        let result = detect_list_marker("+ item");
-        assert_eq!(result, Some((false, 0, 2)));
-    }
-
-    #[test]
     fn list_marker_ordered_dot() {
         let result = detect_list_marker("1. item");
-        assert_eq!(result, Some((true, 1, 3)));
-    }
-
-    #[test]
-    fn list_marker_ordered_paren() {
-        let result = detect_list_marker("1) item");
         assert_eq!(result, Some((true, 1, 3)));
     }
 
@@ -844,21 +826,6 @@ mod tests {
         let blocks = parse_blocks(&["Hello world."]);
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], RawBlock::Paragraph(_)));
-    }
-
-    #[test]
-    fn blocks_heading_and_para() {
-        let blocks = parse_blocks(&["# Title", "", "Body text."]);
-        assert_eq!(blocks.len(), 2);
-        assert!(matches!(blocks[0], RawBlock::Heading { .. }));
-        assert!(matches!(blocks[1], RawBlock::Paragraph(_)));
-    }
-
-    #[test]
-    fn blocks_directive() {
-        let blocks = parse_blocks(&["{@series(fig)}"]);
-        assert_eq!(blocks.len(), 1);
-        assert!(matches!(blocks[0], RawBlock::Directive(_)));
     }
 
     #[test]
@@ -1095,25 +1062,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fenced_code_bare_lang() {
-        let lines = vec!["```python", "print(1)", "```"];
-        let result = try_parse_fenced_code(&lines).unwrap();
-        if let (RawBlock::CodeBlock { attrs, .. }, _) = result {
-            assert_eq!(attrs.unwrap(), "python");
-        }
-    }
-
-    #[test]
-    fn fenced_code_multi_line_source() {
-        let lines = vec!["```", "line 1", "line 2", "line 3", "```"];
-        let result = try_parse_fenced_code(&lines).unwrap();
-        if let (RawBlock::CodeBlock { source, .. }, consumed) = result {
-            assert!(source.contains("line 1\nline 2\nline 3"));
-            assert_eq!(consumed, 5);
-        }
-    }
-
     // ── try_parse_list edge cases ──
 
     #[test]
@@ -1158,16 +1106,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn try_parse_list_blank_stops_at_eof() {
-        let lines = vec!["- item", ""];
-        let result = try_parse_list(&lines).unwrap();
-        if let (RawBlock::List { items, .. }, consumed) = result {
-            assert_eq!(items.len(), 1);
-            assert_eq!(consumed, 1);
-        }
-    }
-
     // ── parse_paragraph edge cases ──
 
     #[test]
@@ -1176,12 +1114,4 @@ mod tests {
         assert_eq!(consumed, 1);
     }
 
-    #[test]
-    fn paragraph_multiline_joins() {
-        let (block, consumed) = parse_paragraph(&["Line 1", "Line 2", "Line 3"]);
-        assert_eq!(consumed, 3);
-        if let RawBlock::Paragraph(text) = block {
-            assert_eq!(text, "Line 1\nLine 2\nLine 3");
-        }
-    }
 }

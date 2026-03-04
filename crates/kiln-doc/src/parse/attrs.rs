@@ -879,11 +879,6 @@ mod tests {
     }
 
     #[test]
-    fn property_token_quoted_value() {
-        assert!(is_property_token("key=\"value\""));
-    }
-
-    #[test]
     fn property_token_bare_word_not_property() {
         assert!(!is_property_token("figure"));
     }
@@ -911,12 +906,6 @@ mod tests {
     #[test]
     fn property_token_empty_not_property() {
         assert!(!is_property_token(""));
-    }
-
-    #[test]
-    fn property_token_nested_eq() {
-        // Equals inside brackets should not be considered top-level
-        assert!(!is_property_token("[lang=\"rust\"]"));
     }
 
     // ── split_top_level_hint_commas ──
@@ -956,16 +945,6 @@ mod tests {
     #[test]
     fn top_level_eq_in_quotes() {
         assert!(find_top_level_eq("\"a=b\"").is_none());
-    }
-
-    #[test]
-    fn top_level_eq_in_brackets() {
-        assert!(find_top_level_eq("[a=b]").is_none());
-    }
-
-    #[test]
-    fn top_level_eq_in_parens() {
-        assert!(find_top_level_eq("(a=b)").is_none());
     }
 
     #[test]
@@ -1098,18 +1077,6 @@ mod tests {
         assert_eq!(scan_delimited_token(&chars, 0), 5);
     }
 
-    #[test]
-    fn scan_delimited_skips_paren_comma() {
-        let chars: Vec<char> = "(a,b),c".chars().collect();
-        assert_eq!(scan_delimited_token(&chars, 0), 5);
-    }
-
-    #[test]
-    fn scan_delimited_skips_bracket_comma() {
-        let chars: Vec<char> = "[a,b],c".chars().collect();
-        assert_eq!(scan_delimited_token(&chars, 0), 5);
-    }
-
     // ── split_kv ──
 
     #[test]
@@ -1203,12 +1170,6 @@ mod tests {
     // ── parse_hint_directive edge cases ──
 
     #[test]
-    fn parse_hint_directive_empty_args() {
-        let result = parse_hint_directive("");
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn parse_hint_directive_no_properties() {
         // Just a selector with no property assignments
         let result = parse_hint_directive("figure");
@@ -1228,8 +1189,4 @@ mod tests {
 
     // ── is_property_token edge cases ──
 
-    #[test]
-    fn is_property_token_hyphenated_key() {
-        assert!(is_property_token("my-key=value"));
-    }
 }

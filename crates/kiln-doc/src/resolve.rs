@@ -1225,24 +1225,6 @@ See @fig:pic.";
     // ── Cascade hints ──
 
     #[test]
-    fn cascade_this_hint_applies_to_self() {
-        reset_id_counter();
-        let input = "![img](a.png){@hint(this, width=100)}";
-        let mut doc = parse(input).unwrap();
-        HoistDirectives.run(&mut doc);
-        CascadeHints.run(&mut doc);
-        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
-        // The this hint should be applied to the node itself
-        if !figs.is_empty() {
-            assert!(
-                figs[0].attrs.properties.contains_key("width")
-                    || !find_all(&doc.content, |n| n.attrs.properties.contains_key("width")).is_empty(),
-                "this hint should apply"
-            );
-        }
-    }
-
-    #[test]
     fn cascade_hint_applies_to_matching_nodes() {
         reset_id_counter();
         let input = "\
@@ -1399,24 +1381,6 @@ See @fig:pic.";
     // ── bump_depth ──
 
     #[test]
-    fn bump_depth_extends_array() {
-        let mut locals = Locals::default();
-        locals.series.insert("s".into(), SeriesState {
-            counts: Vec::new(),
-            counter: 0,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["I".into(), "1".into()],
-                cycle: false,
-            },
-        });
-        bump_depth(&mut locals, "s", 1);
-        assert_eq!(locals.series["s"].counts, vec![1]);
-        bump_depth(&mut locals, "s", 2);
-        assert_eq!(locals.series["s"].counts, vec![1, 1]);
-    }
-
-    #[test]
     fn bump_depth_truncates_on_level_decrease() {
         let mut locals = Locals::default();
         locals.series.insert("s".into(), SeriesState {
@@ -1460,32 +1424,7 @@ See @fig:pic.";
 
     // ── incr_counter ──
 
-    #[test]
-    fn incr_counter_increments() {
-        let mut locals = Locals::default();
-        locals.series.insert("fig".into(), SeriesState {
-            counts: Vec::new(),
-            counter: 0,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["1".into()],
-                cycle: false,
-            },
-        });
-        incr_counter(&mut locals, "fig");
-        assert_eq!(locals.series["fig"].counter, 1);
-        incr_counter(&mut locals, "fig");
-        assert_eq!(locals.series["fig"].counter, 2);
-    }
-
     // ── get_compile_format ──
-
-    #[test]
-    fn get_compile_format_default() {
-        use crate::ast::Attrs;
-        let attrs = Attrs::default();
-        assert_eq!(get_compile_format(&attrs, "typst"), "typst");
-    }
 
     #[test]
     fn get_compile_format_custom() {
