@@ -3,7 +3,7 @@ mod block;
 mod inline;
 mod section;
 
-use crate::ast::{Document, Metadata, Node, NodeKind};
+use crate::ast::{Attrs, Document, Metadata, Node, NodeKind};
 
 use attrs::{
     apply_brace_attrs, extract_lang, extract_raw_format,
@@ -106,7 +106,7 @@ fn is_single_image(children: &[Node]) -> bool {
 }
 
 fn promote_to_figure(children: Vec<Node>) -> Node {
-    let img = children
+    let mut img = children
         .into_iter()
         .next()
         .expect("is_single_image verified one child");
@@ -115,11 +115,23 @@ fn promote_to_figure(children: Vec<Node>) -> Node {
     } else {
         String::new()
     };
-    let mut fig_children = vec![img];
-    if !alt_text.is_empty() {
-        fig_children.push(Node::caption(vec![Node::text(alt_text)]));
+    // Transfer explicit ID and attrs from the image to the figure.
+    let mut fig = Node::figure(Vec::new());
+    if !img.attrs.auto_id {
+        fig.attrs.id = std::mem::take(&mut img.attrs.id);
+        fig.attrs.auto_id = false;
+        let new_attrs = Attrs::default();
+        img.attrs.id = new_attrs.id;
+        img.attrs.auto_id = true;
     }
-    Node::figure(fig_children)
+    // Transfer classes and properties from image to figure.
+    fig.attrs.classes.append(&mut img.attrs.classes);
+    fig.attrs.properties.extend(img.attrs.properties.drain());
+    fig.children.push(img);
+    if !alt_text.is_empty() {
+        fig.children.push(Node::caption(vec![Node::text(alt_text)]));
+    }
+    fig
 }
 
 /// Convert RawBlocks into proper Nodes with inline parsing.
@@ -142,17 +154,18 @@ fn parse_inlines_in_blocks(blocks: Vec<RawBlock>) -> Vec<Node> {
                     // Already handled as Directive, but handle if slipped through
                     return None;
                 }
-                let children = parse_inline(trimmed);
+                let mut children = parse_inline(trimmed);
                 if children.is_empty() {
                     return None;
                 }
+                // Extract trailing brace attrs before figure promotion, so
+                // `![alt](url){#id}` gets the attrs applied to the Image node
+                // and is then eligible for promotion.
+                maybe_extract_trailing_attrs_from_children(&mut children);
                 // Figure promotion: paragraph with single image
                 if is_single_image(&children) {
                     return Some(promote_to_figure(children));
                 }
-                // Check for trailing brace attrs on last child
-                let mut children = children;
-                maybe_extract_trailing_attrs_from_children(&mut children);
                 Some(Node::paragraph(children))
             }
             RawBlock::CodeBlock { source, attrs } => {
@@ -834,24 +847,33 @@ mod tests {
         assert!(has_hint);
     }
 
-    #[test]
-    fn series_display_roman() {
-        use crate::ast::{Declaration, SeriesDisplay};
-        let doc = parse_ok("{@series(nums, display=roman)}");
-        let has_roman = doc.content.children.iter().any(|n| {
-            n.attrs.declarations.iter().any(|d| matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Roman)))
-        });
-        assert!(has_roman);
+    fn extract_series_config(
+        doc: &crate::ast::Document,
+    ) -> Option<crate::ast::SeriesConfig> {
+        use crate::ast::Declaration;
+        let decl = doc
+            .content
+            .children
+            .iter()
+            .flat_map(|n| &n.attrs.declarations)
+            .next()?;
+        let Declaration::Series { config, .. } = decl;
+        Some(config.clone())
     }
 
     #[test]
-    fn series_display_alpha() {
-        use crate::ast::{Declaration, SeriesDisplay};
-        let doc = parse_ok("{@series(lets, display=alpha)}");
-        let has_alpha = doc.content.children.iter().any(|n| {
-            n.attrs.declarations.iter().any(|d| matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Alpha)))
-        });
-        assert!(has_alpha);
+    fn series_formats_single() {
+        let doc = parse_ok("{@series(nums, formats=I)}");
+        assert_eq!(extract_series_config(&doc).unwrap().formats, vec!["I"]);
+    }
+
+    #[test]
+    fn series_formats_list() {
+        let doc = parse_ok("{@series(nums, formats=[\"I\",\"1\",\"a\"])}");
+        assert_eq!(
+            extract_series_config(&doc).unwrap().formats,
+            vec!["I", "1", "a"]
+        );
     }
 
     #[test]
@@ -1013,16 +1035,11 @@ mod tests {
     }
 
     #[test]
-    fn series_display_hierarchical() {
-        use crate::ast::{Declaration, SeriesDisplay};
-        let doc = parse_ok("{@series(eq, display=hierarchical)}");
-        let is_hierarchical = |d: &Declaration| matches!(d, Declaration::Series { config, .. } if matches!(config.display, SeriesDisplay::Hierarchical));
-        let has = doc
-            .content
-            .children
-            .iter()
-            .any(|n| n.attrs.declarations.iter().any(is_hierarchical));
-        assert!(has);
+    fn series_parent_and_cycle() {
+        let doc = parse_ok("{@series(fig, parent=sec, cycle=true)}");
+        let config = extract_series_config(&doc).unwrap();
+        assert_eq!(config.parent, Some("sec".to_string()));
+        assert!(config.cycle);
     }
 
     #[test]
@@ -1143,5 +1160,42 @@ mod tests {
             code.attrs.properties.get("nowrap"),
             Some(Value::Bool(true))
         ));
+    }
+
+    #[test]
+    fn series_counts_generates_hint() {
+        use crate::ast::Value;
+        use crate::visit::Pass;
+        let doc = parse_ok("{@series(fig, counts=figure)}");
+        // After hoisting, root should have a hint targeting Figure with series="fig".
+        let mut doc = doc;
+        crate::resolve::HoistDirectives.run(&mut doc);
+        let hint = doc
+            .content
+            .attrs
+            .hints
+            .iter()
+            .find(|h| h.property == "series");
+        assert!(hint.is_some(), "counts= should generate a series hint");
+        assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "fig"));
+    }
+
+    #[test]
+    fn series_default_formats() {
+        let doc = parse_ok("{@series(x)}");
+        let config = extract_series_config(&doc).unwrap();
+        assert_eq!(config.formats, vec!["1"]);
+        assert!(config.parent.is_none());
+        assert!(!config.cycle);
+    }
+
+    #[test]
+    fn figure_trailing_id_promoted() {
+        // Trailing {#id} on an image should transfer to the Figure wrapper.
+        let doc = parse_ok("![Alt](img.png){#fig:test}");
+        let fig = &doc.content.children[0];
+        assert!(matches!(fig.kind, NodeKind::Figure));
+        assert_eq!(fig.attrs.id, "fig:test");
+        assert!(!fig.attrs.auto_id);
     }
 }

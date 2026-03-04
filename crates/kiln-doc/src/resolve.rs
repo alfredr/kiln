@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::ast::{Document, Hint, Node, NodeKind, RawBlockCompiler, Selector, Value};
+use crate::ast::{
+    Declaration, Document, FormatToken, Hint, Node, NodeKind, RawBlockCompiler, Selector,
+    SeriesConfig, Value,
+};
 use crate::selector::{NodeSnapshot, matches_selector};
 use crate::visit::Pass;
 
@@ -28,10 +31,12 @@ pub fn resolve(_ctx: &mut ResolveContext) {
 
 /// Resolve hints within a single document (convenience function).
 ///
-/// Runs `HoistDirectives` then `CascadeHints`.
+/// Runs `HoistDirectives` → `CascadeHints` → `AssignNumbers` → `ResolveCrossRefs`.
 pub fn resolve_document(doc: &mut Document) {
     HoistDirectives.run(doc);
     CascadeHints.run(doc);
+    AssignNumbers.run(doc);
+    ResolveCrossRefs.run(doc);
 }
 
 // ── HoistDirectives pass ──
@@ -118,6 +123,312 @@ fn cascade(node: &mut Node, ancestor_hints: &[Vec<Hint>], ancestors: &[NodeSnaps
     }
 }
 
+// ── AssignNumbers pass ──
+
+/// Walk the tree in document order, matching series declarations against
+/// nodes via the cascaded `series` property, assigning numbers and building
+/// a label map for cross-references.
+pub struct AssignNumbers;
+
+impl Pass for AssignNumbers {
+    fn run(&mut self, doc: &mut Document) {
+        // Check if any series declarations exist.
+        if !has_series_declarations(&doc.content) {
+            return;
+        }
+        let mut locals = Locals::default();
+        let mut label_map = HashMap::new();
+        assign_walk(&mut doc.content, &mut locals, &mut label_map);
+        // Stash the label map on the root for ResolveCrossRefs.
+        if !label_map.is_empty() {
+            doc.content
+                .attrs
+                .properties
+                .insert("__label_map".to_string(), encode_label_map(&label_map));
+        }
+    }
+}
+
+/// Locals for the counter engine — shared mutable state during the walk.
+#[derive(Default)]
+struct Locals {
+    /// Per-series state: series_id → SeriesState.
+    series: HashMap<String, SeriesState>,
+}
+
+#[derive(Clone)]
+struct SeriesState {
+    /// Hierarchical count array (one entry per depth level).
+    counts: Vec<i64>,
+    /// Flat counter for non-hierarchical series.
+    counter: i64,
+    /// The series config.
+    config: SeriesConfig,
+}
+
+/// Entry in the label map built during pass 1.
+struct LabelEntry {
+    /// The computed display number (e.g. "I.2.1").
+    number: String,
+    /// The label template (e.g. "Figure {n}").
+    label_template: String,
+}
+
+fn has_series_declarations(node: &Node) -> bool {
+    if node.attrs.declarations.iter().any(|d| matches!(d, Declaration::Series { .. })) {
+        return true;
+    }
+    node.children.iter().any(has_series_declarations)
+}
+
+fn assign_walk(
+    node: &mut Node,
+    locals: &mut Locals,
+    label_map: &mut HashMap<String, LabelEntry>,
+) {
+    // Initialize series state from declarations on this node.
+    for decl in &node.attrs.declarations {
+        let Declaration::Series { id, config } = decl;
+        locals.series.entry(id.clone()).or_insert_with(|| SeriesState {
+            counts: Vec::new(),
+            counter: 0,
+            config: config.clone(),
+        });
+    }
+
+    // Check for series membership via the cascaded `series` property.
+    if let Some(Value::Text(series_id)) = node.attrs.properties.get("series").cloned() {
+        let is_heading = matches!(&node.kind, NodeKind::Heading { .. });
+        let is_hierarchical = is_heading
+            && locals
+                .series
+                .get(&series_id)
+                .is_some_and(|s| s.config.formats.len() > 1);
+
+        if is_hierarchical {
+            let level = match &node.kind {
+                NodeKind::Heading { level } => *level as usize,
+                _ => unreachable!(),
+            };
+            bump_depth(locals, &series_id, level);
+        } else {
+            incr_counter(locals, &series_id);
+        }
+        store_number(node, locals, &series_id, label_map);
+    }
+
+    for child in &mut node.children {
+        assign_walk(child, locals, label_map);
+    }
+}
+
+/// Compute the number for a series and store it on the node.
+fn store_number(
+    node: &mut Node,
+    locals: &Locals,
+    series_id: &str,
+    label_map: &mut HashMap<String, LabelEntry>,
+) {
+    if let Some(state) = locals.series.get(series_id) {
+        let number = render_series_number(state);
+        node.attrs
+            .properties
+            .insert("number".to_string(), Value::Text(number.clone()));
+
+        if !node.attrs.auto_id {
+            let label_template = node
+                .attrs
+                .properties
+                .get("label")
+                .and_then(|v| match v {
+                    Value::Text(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            label_map.insert(
+                node.attrs.id.clone(),
+                LabelEntry {
+                    number,
+                    label_template,
+                },
+            );
+        }
+    }
+}
+
+/// Bump the depth of a hierarchical series at the given level.
+fn bump_depth(locals: &mut Locals, series_id: &str, level: usize) {
+    // Phase 1: update the series state.
+    let updated = if let Some(state) = locals.series.get_mut(series_id) {
+        while state.counts.len() < level {
+            state.counts.push(0);
+        }
+        state.counts[level - 1] += 1;
+        state.counts.truncate(level);
+        true
+    } else {
+        false
+    };
+
+    if !updated {
+        return;
+    }
+
+    // Phase 2: reset child series (separate borrow scope).
+    let child_ids: Vec<String> = locals
+        .series
+        .iter()
+        .filter(|(_, s)| s.config.parent.as_deref() == Some(series_id))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for child_id in child_ids {
+        if let Some(child_state) = locals.series.get_mut(&child_id) {
+            child_state.counter = 0;
+        }
+    }
+}
+
+/// Increment a flat counter for a series.
+fn incr_counter(locals: &mut Locals, series_id: &str) {
+    if let Some(state) = locals.series.get_mut(series_id) {
+        state.counter += 1;
+    }
+}
+
+/// Render the number for a series based on its current state.
+fn render_series_number(state: &SeriesState) -> String {
+    if !state.counts.is_empty() && state.counter > 0 {
+        // Hierarchical with flat counter: "I.2.1" (parent hierarchy + own counter).
+        let parent_num = render_hierarchical(&state.counts, &state.config);
+        let own_fmt = get_format_token(&state.config, state.counts.len());
+        format!("{}.{}", parent_num, own_fmt.render(state.counter as u32))
+    } else if !state.counts.is_empty() {
+        // Pure hierarchical: "I.2.1"
+        render_hierarchical(&state.counts, &state.config)
+    } else {
+        // Flat counter only: "1", "2", etc.
+        let fmt = get_format_token(&state.config, 0);
+        fmt.render(state.counter as u32)
+    }
+}
+
+/// Render a hierarchical number from a counts array.
+fn render_hierarchical(counts: &[i64], config: &SeriesConfig) -> String {
+    counts
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let token = get_format_token(config, i);
+            token.render(c as u32)
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// Get the format token for a given depth index.
+fn get_format_token(config: &SeriesConfig, depth: usize) -> FormatToken {
+    if config.formats.is_empty() {
+        return FormatToken::parse("1");
+    }
+    let idx = if config.cycle {
+        depth % config.formats.len()
+    } else {
+        depth.min(config.formats.len() - 1)
+    };
+    FormatToken::parse(&config.formats[idx])
+}
+
+/// Encode a label map as a `Value::Map` for stashing on the root node.
+fn encode_label_map(map: &HashMap<String, LabelEntry>) -> Value {
+    let mut m = HashMap::new();
+    for (id, entry) in map {
+        let mut inner = HashMap::new();
+        inner.insert("number".to_string(), Value::Text(entry.number.clone()));
+        inner.insert(
+            "label".to_string(),
+            Value::Text(entry.label_template.clone()),
+        );
+        m.insert(id.clone(), Value::Map(inner));
+    }
+    Value::Map(m)
+}
+
+/// Decode a label map from a `Value::Map` stashed on the root node.
+fn decode_label_map(val: &Value) -> HashMap<String, LabelEntry> {
+    let Value::Map(m) = val else {
+        return HashMap::new();
+    };
+    m.iter()
+        .filter_map(|(id, inner)| {
+            let Value::Map(fields) = inner else {
+                return None;
+            };
+            let number = extract_text(fields.get("number"));
+            let label_template = extract_text(fields.get("label"));
+            Some((id.clone(), LabelEntry { number, label_template }))
+        })
+        .collect()
+}
+
+fn extract_text(val: Option<&Value>) -> String {
+    match val {
+        Some(Value::Text(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+// ── ResolveCrossRefs pass ──
+
+/// Second pass: resolve `CrossRef { target }` nodes using the label map
+/// built by `AssignNumbers`.
+pub struct ResolveCrossRefs;
+
+impl Pass for ResolveCrossRefs {
+    fn run(&mut self, doc: &mut Document) {
+        let label_map = doc
+            .content
+            .attrs
+            .properties
+            .get("__label_map")
+            .map(decode_label_map)
+            .unwrap_or_default();
+
+        if label_map.is_empty() {
+            return;
+        }
+
+        resolve_refs(&mut doc.content, &label_map);
+
+        // Clean up the internal label map property.
+        doc.content.attrs.properties.remove("__label_map");
+    }
+}
+
+fn resolve_refs(node: &mut Node, label_map: &HashMap<String, LabelEntry>) {
+    if let NodeKind::CrossRef { target } = &node.kind
+        && let Some(entry) = label_map.get(target)
+    {
+        let display = format_label_display(&entry.label_template, &entry.number);
+        node.attrs
+            .properties
+            .insert("text".to_string(), Value::Text(display));
+        node.attrs
+            .properties
+            .insert("href".to_string(), Value::Text(format!("#{target}")));
+    }
+    for child in &mut node.children {
+        resolve_refs(child, label_map);
+    }
+}
+
+fn format_label_display(template: &str, number: &str) -> String {
+    if template.is_empty() {
+        number.to_string()
+    } else {
+        template.replace("{n}", number)
+    }
+}
+
 // ── CompileBlocks pass ──
 
 /// Compile raw blocks and preview code blocks, storing results in `attrs.properties`.
@@ -185,7 +496,7 @@ fn get_compile_format<'a>(attrs: &'a crate::ast::Attrs, default: &'a str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{CompoundSelector, SelectorExpr, Value, reset_id_counter};
+    use crate::ast::{CompoundSelector, NumberFormat, SelectorExpr, Value, reset_id_counter};
     use crate::parse::parse;
 
     fn find_node(node: &Node, pred: fn(&Node) -> bool) -> Option<&Node> {
@@ -374,5 +685,355 @@ mod tests {
             .find(|n| matches!(n.kind, NodeKind::Paragraph))
             .unwrap();
         assert!(para.attrs.properties.is_empty());
+    }
+
+    // ── Counter engine tests ──
+
+    fn get_number(node: &Node) -> Option<&str> {
+        node.attrs.properties.get("number").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    fn find_all(node: &Node, pred: fn(&Node) -> bool) -> Vec<&Node> {
+        let mut result = Vec::new();
+        find_all_walk(node, pred, &mut result);
+        result
+    }
+
+    fn find_all_walk<'a>(node: &'a Node, pred: fn(&Node) -> bool, result: &mut Vec<&'a Node>) {
+        if pred(node) {
+            result.push(node);
+        }
+        for child in &node.children {
+            find_all_walk(child, pred, result);
+        }
+    }
+
+    #[test]
+    fn flat_counter_figures() {
+        reset_id_counter();
+        let input = "\
+{@series(fig, counts=figure)}
+{@hint(figure, label=\"Figure {n}\")}
+
+![First](a.png){#fig:first}
+
+![Second](b.png){#fig:second}
+
+![Third](c.png){#fig:third}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        assert_eq!(get_number(figs[2]), Some("3"));
+    }
+
+    #[test]
+    fn hierarchical_section_numbering() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+
+# Introduction {#sec:intro}
+
+## Background {#sec:bg}
+
+## Methods {#sec:methods}
+
+# Results {#sec:results}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        assert_eq!(get_number(headings[0]), Some("I"), "Introduction should be I");
+        assert_eq!(get_number(headings[1]), Some("I.1"), "Background should be I.1");
+        assert_eq!(get_number(headings[2]), Some("I.2"), "Methods should be I.2");
+        assert_eq!(get_number(headings[3]), Some("II"), "Results should be II");
+    }
+
+    #[test]
+    fn figure_counter_resets_with_parent() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@series(fig, counts=figure, parent=sec, formats=[\"1\"])}
+{@hint(figure, label=\"Figure {n}\")}
+
+# Chapter One
+
+![A](a.png){#fig:a}
+
+![B](b.png){#fig:b}
+
+# Chapter Two
+
+![C](c.png){#fig:c}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        // After chapter change, counter resets.
+        assert_eq!(get_number(figs[2]), Some("1"));
+    }
+
+    #[test]
+    fn cross_ref_forward_and_backward() {
+        reset_id_counter();
+        let input = "\
+{@series(fig, counts=figure)}
+{@hint(figure, label=\"Figure {n}\")}
+
+See @fig:second for details.
+
+![First](a.png){#fig:first}
+
+![Second](b.png){#fig:second}
+
+As shown in @fig:first above.";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        // Find cross-refs.
+        let refs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        assert_eq!(refs.len(), 2);
+
+        // Forward ref to fig:second should resolve.
+        let text0 = refs[0].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(text0, Some("Figure 2"));
+
+        // Backward ref to fig:first should resolve.
+        let text1 = refs[1].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(text1, Some("Figure 1"));
+    }
+
+    #[test]
+    fn format_token_roman() {
+        use crate::ast::FormatToken;
+        assert_eq!(FormatToken::parse("I").render(4), "IV");
+        assert_eq!(FormatToken::parse("i").render(4), "iv");
+        assert_eq!(FormatToken::parse("(a)").render(3), "(c)");
+        assert_eq!(FormatToken::parse("1").render(42), "42");
+        assert_eq!(FormatToken::parse("A").render(1), "A");
+    }
+
+    #[test]
+    fn no_series_no_crash() {
+        reset_id_counter();
+        let mut doc = parse("# Just a heading\n\nSome text.").unwrap();
+        resolve_document(&mut doc);
+        // No series declarations → no numbers assigned, no crash.
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert!(!headings[0].attrs.properties.contains_key("number"));
+    }
+
+    #[test]
+    fn cross_ref_no_label_shows_number() {
+        reset_id_counter();
+        let input = "\
+{@series(fig, counts=figure)}
+
+![Pic](a.png){#fig:pic}
+
+See @fig:pic.";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let refs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        assert_eq!(refs.len(), 1);
+        let text = refs[0].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        // No label template → bare number.
+        assert_eq!(text, Some("1"));
+    }
+
+    #[test]
+    fn encode_decode_label_map_roundtrip() {
+        let mut map = HashMap::new();
+        map.insert(
+            "fig:a".to_string(),
+            LabelEntry {
+                number: "I.1".to_string(),
+                label_template: "Figure {n}".to_string(),
+            },
+        );
+        map.insert(
+            "fig:b".to_string(),
+            LabelEntry {
+                number: "II.3".to_string(),
+                label_template: String::new(),
+            },
+        );
+        let encoded = encode_label_map(&map);
+        let decoded = decode_label_map(&encoded);
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded["fig:a"].number, "I.1");
+        assert_eq!(decoded["fig:a"].label_template, "Figure {n}");
+        assert_eq!(decoded["fig:b"].number, "II.3");
+        assert!(decoded["fig:b"].label_template.is_empty());
+    }
+
+    #[test]
+    fn hierarchical_three_levels() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\",\"a\"])}
+
+# Chapter {#ch1}
+
+## Section {#s1}
+
+### Sub {#sub1}
+
+## Section Two {#s2}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        assert_eq!(get_number(headings[0]), Some("I"));
+        assert_eq!(get_number(headings[1]), Some("I.1"));
+        assert_eq!(get_number(headings[2]), Some("I.1.a"));
+        assert_eq!(get_number(headings[3]), Some("I.2"));
+    }
+
+    #[test]
+    fn format_repeat_last() {
+        reset_id_counter();
+        // formats=["I","1"] with 3 levels — depth 3 should use "1" (repeat last).
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+
+# Top {#t}
+
+## Mid {#m}
+
+### Deep {#d}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(get_number(headings[0]), Some("I"));
+        assert_eq!(get_number(headings[1]), Some("I.1"));
+        // Depth 3 repeats last format ("1" = arabic).
+        assert_eq!(get_number(headings[2]), Some("I.1.1"));
+    }
+
+    #[test]
+    fn render_series_number_flat() {
+        let state = SeriesState {
+            counts: Vec::new(),
+            counter: 5,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["a".to_string()],
+                cycle: false,
+            },
+        };
+        assert_eq!(render_series_number(&state), "e");
+    }
+
+    #[test]
+    fn render_series_number_hierarchical() {
+        let state = SeriesState {
+            counts: vec![2, 3],
+            counter: 0,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["I".to_string(), "1".to_string()],
+                cycle: false,
+            },
+        };
+        assert_eq!(render_series_number(&state), "II.3");
+    }
+
+    #[test]
+    fn render_series_number_hierarchical_with_counter() {
+        let state = SeriesState {
+            counts: vec![1],
+            counter: 4,
+            config: SeriesConfig {
+                parent: None,
+                formats: vec!["I".to_string(), "1".to_string()],
+                cycle: false,
+            },
+        };
+        // Parent "I" + flat counter "4".
+        assert_eq!(render_series_number(&state), "I.4");
+    }
+
+    #[test]
+    fn get_format_token_cycling() {
+        let config = SeriesConfig {
+            parent: None,
+            formats: vec!["I".to_string(), "A".to_string()],
+            cycle: true,
+        };
+        // depth 0 → "I", depth 1 → "A", depth 2 → "I" (wraps)
+        assert!(matches!(
+            get_format_token(&config, 0).format,
+            NumberFormat::RomanUpper
+        ));
+        assert!(matches!(
+            get_format_token(&config, 1).format,
+            NumberFormat::AlphaUpper
+        ));
+        assert!(matches!(
+            get_format_token(&config, 2).format,
+            NumberFormat::RomanUpper
+        ));
+    }
+
+    #[test]
+    fn get_format_token_repeat_last() {
+        let config = SeriesConfig {
+            parent: None,
+            formats: vec!["I".to_string(), "1".to_string()],
+            cycle: false,
+        };
+        // depth 2 and beyond → "1" (repeat last)
+        assert!(matches!(
+            get_format_token(&config, 2).format,
+            NumberFormat::Arabic
+        ));
+        assert!(matches!(
+            get_format_token(&config, 10).format,
+            NumberFormat::Arabic
+        ));
+    }
+
+    #[test]
+    fn get_format_token_empty_defaults() {
+        let config = SeriesConfig {
+            parent: None,
+            formats: Vec::new(),
+            cycle: false,
+        };
+        assert!(matches!(
+            get_format_token(&config, 0).format,
+            NumberFormat::Arabic
+        ));
+    }
+
+    #[test]
+    fn format_label_display_with_template() {
+        assert_eq!(format_label_display("Figure {n}", "I.2"), "Figure I.2");
+        assert_eq!(format_label_display("", "42"), "42");
     }
 }

@@ -1,4 +1,4 @@
-use crate::ast::{Attrs, Declaration, Hint, Node, NodeKind, SeriesConfig, SeriesDisplay, Value};
+use crate::ast::{Attrs, Declaration, Hint, Node, NodeKind, SeriesConfig, Value};
 
 use super::inline::find_matching_delim;
 
@@ -249,8 +249,9 @@ fn scan_id_or_class(sigil: char, chars: &[char], pos: usize, attrs: &mut Attrs) 
 fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
     match cmd {
         "series" => {
-            if let Some(decl) = parse_series_directive(args) {
+            if let Some((decl, hints)) = parse_series_directive_full(args) {
                 attrs.declarations.push(decl);
+                attrs.hints.extend(hints);
             }
         }
         "hint" => {
@@ -260,33 +261,66 @@ fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
     }
 }
 
-/// Parse `@series(figs, label="Figure", display=hierarchical)`
-fn parse_series_directive(args: &str) -> Option<Declaration> {
+/// Parse `@series(fig, counts=figure, parent=sec, formats=["I","1"], cycle=true)`.
+///
+/// The `counts=SELECTOR` sugar generates a `Hint` on the enclosing node that
+/// sets `series=ID` on matching descendants.  Returns `(Declaration, Vec<Hint>)`.
+fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
     let parts = split_directive_args(args);
     if parts.is_empty() {
         return None;
     }
     let id = parts[0].0.clone();
-    let mut label = id.clone();
-    let mut display = SeriesDisplay::Arabic;
+    let mut parent: Option<String> = None;
+    let mut formats: Vec<String> = vec!["1".to_string()];
+    let mut cycle = false;
+    let mut counts_hints: Vec<Hint> = Vec::new();
+
     for (key, val) in &parts[1..] {
         match key.as_str() {
-            "label" => label = val.clone(),
-            "display" => {
-                display = match val.as_str() {
-                    "hierarchical" => SeriesDisplay::Hierarchical,
-                    "roman" => SeriesDisplay::Roman,
-                    "alpha" => SeriesDisplay::Alpha,
-                    _ => SeriesDisplay::Arabic,
-                };
+            "parent" => parent = Some(val.clone()),
+            "cycle" => cycle = val == "true",
+            "formats" => {
+                formats = parse_format_list(val);
+            }
+            "counts" => {
+                // `counts=SELECTOR` expands to a hint: @hint(SELECTOR, series="ID")
+                counts_hints.extend(
+                    crate::selector::parse_selector(val).map(|selector| Hint {
+                        selector,
+                        property: "series".to_string(),
+                        value: Value::Text(id.clone()),
+                    }),
+                );
             }
             _ => {}
         }
     }
-    Some(Declaration::Series {
+    let decl = Declaration::Series {
         id,
-        config: SeriesConfig { label, display },
-    })
+        config: SeriesConfig {
+            parent,
+            formats,
+            cycle,
+        },
+    };
+    Some((decl, counts_hints))
+}
+
+/// Parse a format list like `["I","1","a"]` into a `Vec<String>`.
+/// Also accepts a single bare token like `I` → `vec!["I"]`.
+fn parse_format_list(s: &str) -> Vec<String> {
+    let s = s.trim();
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len() - 1];
+        inner
+            .split(',')
+            .map(|t| t.trim().trim_matches('"').trim_matches('\'').to_string())
+            .filter(|t| !t.is_empty())
+            .collect()
+    } else {
+        vec![s.to_string()]
+    }
 }
 
 /// Parse `@hint(figure.wide, layout="full", position="top")`.
@@ -415,8 +449,8 @@ fn scan_delimited_token(chars: &[char], start: usize) -> usize {
         let ch = chars[pos];
         match ch {
             '"' => in_quotes = !in_quotes,
-            '(' if !in_quotes => depth += 1,
-            ')' if !in_quotes && depth > 0 => depth -= 1,
+            '(' | '[' if !in_quotes => depth += 1,
+            ')' | ']' if !in_quotes && depth > 0 => depth -= 1,
             ',' if !in_quotes && depth == 0 => break,
             _ => {}
         }
@@ -463,8 +497,8 @@ fn find_top_level_eq(s: &str) -> Option<usize> {
     for (i, ch) in s.char_indices() {
         match ch {
             '"' => in_quotes = !in_quotes,
-            '(' if !in_quotes => depth += 1,
-            ')' if !in_quotes => depth -= 1,
+            '(' | '[' if !in_quotes => depth += 1,
+            ')' | ']' if !in_quotes => depth -= 1,
             '=' if !in_quotes && depth == 0 => return Some(i),
             _ => {}
         }

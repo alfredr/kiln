@@ -166,9 +166,26 @@ fn render_node(node: &Node, out: &mut String) {
             close_tag("cite", out);
         }
         NodeKind::CrossRef { target } => {
-            Tag::new("a")
-                .attr("href", &format!("#{target}"))
-                .wrap_text(target, out);
+            let default_href = format!("#{target}");
+            let href = node
+                .attrs
+                .properties
+                .get("href")
+                .and_then(|v| match v {
+                    Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or(&default_href);
+            let text = node
+                .attrs
+                .properties
+                .get("text")
+                .and_then(|v| match v {
+                    Value::Text(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or(target);
+            Tag::new("a").attr("href", href).wrap_text(text, out);
         }
         NodeKind::SoftBreak => out.push('\n'),
         NodeKind::HardBreak => out.push_str("<br>"),

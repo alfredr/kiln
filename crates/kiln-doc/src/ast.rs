@@ -280,23 +280,111 @@ pub enum Declaration {
 /// Configuration for a series (counter/sequence manager).
 #[derive(Debug, Clone)]
 pub struct SeriesConfig {
-    /// Display prefix: "Figure", "Listing", "Equation".
-    pub label: String,
-    /// How the resolved number renders.
-    pub display: SeriesDisplay,
+    /// Parent series id — inherits barriers, resets this counter on parent bump.
+    pub parent: Option<String>,
+    /// Format tokens per depth level: `["I", "1", "a"]`.
+    /// Each token is a shorthand: "1" = arabic, "I" = roman upper, "a" = alpha lower, etc.
+    /// For depths beyond the array length, repeats the last element (or cycles if `cycle` is set).
+    pub formats: Vec<String>,
+    /// Whether the format list cycles (`depth % len`) or repeats the last element.
+    pub cycle: bool,
 }
 
-/// How a series number is displayed.
+/// Number formatting style for a single counter level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeriesDisplay {
-    /// 1, 2, 3 (flat, ignores section depth).
+pub enum NumberFormat {
     Arabic,
-    /// 2.3 (section.seq, hierarchical).
-    Hierarchical,
-    /// i, ii, iii.
-    Roman,
-    /// a, b, c.
-    Alpha,
+    RomanUpper,
+    RomanLower,
+    AlphaUpper,
+    AlphaLower,
+}
+
+/// A parsed format token: style with optional prefix/suffix wrapping.
+#[derive(Debug, Clone)]
+pub struct FormatToken {
+    pub prefix: String,
+    pub format: NumberFormat,
+    pub suffix: String,
+}
+
+impl NumberFormat {
+    /// Render a count in this format.
+    pub fn render(self, n: u32) -> String {
+        match self {
+            Self::Arabic => n.to_string(),
+            Self::RomanUpper => to_roman(n, true),
+            Self::RomanLower => to_roman(n, false),
+            Self::AlphaUpper => to_alpha(n, true),
+            Self::AlphaLower => to_alpha(n, false),
+        }
+    }
+}
+
+impl FormatToken {
+    /// Parse a shorthand token: "1", "I", "i", "A", "a", "(a)", "(1)", etc.
+    pub fn parse(token: &str) -> Self {
+        let token = token.trim();
+        // Check for prefix/suffix wrapping: "(X)" or similar
+        if token.len() >= 3 && token.starts_with('(') && token.ends_with(')') {
+            let inner = &token[1..token.len() - 1];
+            let format = Self::parse_style(inner);
+            return Self {
+                prefix: "(".to_string(),
+                format,
+                suffix: ")".to_string(),
+            };
+        }
+        let format = Self::parse_style(token);
+        Self {
+            prefix: String::new(),
+            format,
+            suffix: String::new(),
+        }
+    }
+
+    fn parse_style(s: &str) -> NumberFormat {
+        match s {
+            "I" => NumberFormat::RomanUpper,
+            "i" => NumberFormat::RomanLower,
+            "A" => NumberFormat::AlphaUpper,
+            "a" => NumberFormat::AlphaLower,
+            _ => NumberFormat::Arabic,
+        }
+    }
+
+    /// Render a count using this token's format and wrapping.
+    pub fn render(&self, n: u32) -> String {
+        format!("{}{}{}", self.prefix, self.format.render(n), self.suffix)
+    }
+}
+
+fn to_roman(mut n: u32, upper: bool) -> String {
+    const VALS: [(u32, &str); 13] = [
+        (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+        (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+        (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+    ];
+    if n == 0 {
+        return "0".to_string();
+    }
+    let mut result = String::new();
+    for &(val, sym) in &VALS {
+        while n >= val {
+            result.push_str(sym);
+            n -= val;
+        }
+    }
+    if upper { result } else { result.to_lowercase() }
+}
+
+fn to_alpha(n: u32, upper: bool) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    let base = if upper { b'A' } else { b'a' };
+    let idx = ((n - 1) % 26) as u8;
+    ((base + idx) as char).to_string()
 }
 
 // ── Typed values ──
@@ -557,5 +645,82 @@ impl Node {
             source: source.into(),
         })
         .with_children(children)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_roman_values() {
+        assert_eq!(to_roman(0, true), "0");
+        assert_eq!(to_roman(1, true), "I");
+        assert_eq!(to_roman(4, true), "IV");
+        assert_eq!(to_roman(9, true), "IX");
+        assert_eq!(to_roman(14, true), "XIV");
+        assert_eq!(to_roman(42, true), "XLII");
+        assert_eq!(to_roman(1999, true), "MCMXCIX");
+    }
+
+    #[test]
+    fn to_roman_lowercase() {
+        assert_eq!(to_roman(4, false), "iv");
+        assert_eq!(to_roman(42, false), "xlii");
+    }
+
+    #[test]
+    fn to_alpha_values() {
+        assert_eq!(to_alpha(0, true), "0");
+        assert_eq!(to_alpha(1, true), "A");
+        assert_eq!(to_alpha(26, true), "Z");
+        assert_eq!(to_alpha(27, true), "A"); // wraps
+        assert_eq!(to_alpha(1, false), "a");
+        assert_eq!(to_alpha(26, false), "z");
+        assert_eq!(to_alpha(27, false), "a"); // wraps
+    }
+
+    #[test]
+    fn format_token_bare_tokens() {
+        let t = FormatToken::parse("1");
+        assert!(matches!(t.format, NumberFormat::Arabic));
+        assert!(t.prefix.is_empty());
+        assert!(t.suffix.is_empty());
+
+        let t = FormatToken::parse("I");
+        assert!(matches!(t.format, NumberFormat::RomanUpper));
+
+        let t = FormatToken::parse("i");
+        assert!(matches!(t.format, NumberFormat::RomanLower));
+
+        let t = FormatToken::parse("A");
+        assert!(matches!(t.format, NumberFormat::AlphaUpper));
+
+        let t = FormatToken::parse("a");
+        assert!(matches!(t.format, NumberFormat::AlphaLower));
+    }
+
+    #[test]
+    fn format_token_wrapped() {
+        let t = FormatToken::parse("(a)");
+        assert_eq!(t.prefix, "(");
+        assert_eq!(t.suffix, ")");
+        assert!(matches!(t.format, NumberFormat::AlphaLower));
+        assert_eq!(t.render(3), "(c)");
+    }
+
+    #[test]
+    fn format_token_unknown_defaults_arabic() {
+        let t = FormatToken::parse("xyz");
+        assert!(matches!(t.format, NumberFormat::Arabic));
+    }
+
+    #[test]
+    fn number_format_render() {
+        assert_eq!(NumberFormat::Arabic.render(42), "42");
+        assert_eq!(NumberFormat::RomanUpper.render(4), "IV");
+        assert_eq!(NumberFormat::RomanLower.render(4), "iv");
+        assert_eq!(NumberFormat::AlphaUpper.render(3), "C");
+        assert_eq!(NumberFormat::AlphaLower.render(3), "c");
     }
 }
