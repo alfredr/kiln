@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/kiln", "crates/kiln-doc"]
+
+[workspace.metadata.dylint]
+libraries = [
+    { git = "https://github.com/alfredr/oxisym" },
+]

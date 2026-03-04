@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ site_title }}{% endblock %}</title>
+  <link rel="stylesheet" href="/css/docs.css">
+</head>
+<body>
+  <input type="checkbox" id="nav-toggle" class="nav-toggle">
+  <label for="nav-toggle" class="nav-toggle-label">Menu</label>
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="/">kiln docs</a>
+    </div>
+    <nav>
+      <ol>
+        {% for page in pages %}
+        <li{% if path is defined and page.path == path %} class="active"{% endif %}><a href="/{{ page.path }}/">{{ page.title }}</a></li>
+        {% endfor %}
+      </ol>
+    </nav>
+  </aside>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    <p>Built with kiln</p>
+  </footer>
+</body>
+</html>

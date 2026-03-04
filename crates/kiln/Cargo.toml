@@ -1,0 +1,36 @@
+[package]
+name = "kiln"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "kiln"
+path = "src/main.rs"
+
+[dependencies]
+kiln-doc = { path = "../kiln-doc" }
+
+typst = "0.14"
+typst-html = "0.14"
+typst-kit = { version = "0.14", features = ["embed-fonts", "fonts"] }
+typst-library = "0.14"
+typst-syntax = "0.14"
+
+clap = { version = "4", features = ["derive"] }
+comemo = "0.4"
+ecow = "0.2"
+chrono = "0.4"
+
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+tera = "1"
+walkdir = "2"
+anyhow = "1"
+regex = "1"
+tempfile = "3"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+tower-livereload = "0.9"
+notify-debouncer-mini = "0.5"

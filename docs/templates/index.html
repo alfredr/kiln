@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+<article>
+  <h1>kiln documentation</h1>
+  <p class="lead">kiln is a document-native static site generator built in Rust. It parses markdown into a document AST and renders clean, semantic HTML.</p>
+
+  <h2>Documentation</h2>
+  <ol class="toc">
+    {% for page in pages %}
+    <li>
+      <a href="/{{ page.path }}/">{{ page.title }}</a>
+    </li>
+    {% endfor %}
+  </ol>
+</article>
+{% endblock %}

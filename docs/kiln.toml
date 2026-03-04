@@ -1,0 +1,8 @@
+[site]
+title = "kiln docs"
+url = "http://localhost:3000"
+description = "Documentation for kiln, a document-native static site generator"
+author = ""
+
+[build]
+slug_pattern = "^\\d+-(.+)$"
