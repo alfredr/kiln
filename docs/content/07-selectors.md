@@ -2,7 +2,7 @@
 title: "Selectors"
 ---
 
-Selectors are patterns that match nodes in the document tree. They control which elements receive cascading properties from `@hint` directives and configuration hints. The syntax draws from CSS, adapted for kiln's document model.
+Selectors are patterns that match nodes in the document tree. They control which elements receive cascading properties from `@init` directives. The syntax draws from CSS, adapted for kiln's document model.
 
 ## Simple Selectors
 
@@ -11,9 +11,9 @@ Selectors are patterns that match nodes in the document tree. They control which
 A bare name matches all nodes of that kind. Both kebab-case and short aliases are accepted.
 
 ```markdown
-{@hint(figure, series="figs")}
-{@hint(code-block, theme="dark")}
-{@hint(h, numbering=true)}
+{@init(figure, series="figs")}
+{@init(code-block, theme="dark")}
+{@init(h, numbering=true)}
 ```
 
 ### Class
@@ -21,8 +21,8 @@ A bare name matches all nodes of that kind. Both kebab-case and short aliases ar
 A dot-prefixed name matches nodes with that CSS class.
 
 ```markdown
-{@hint(.wide, layout="full")}
-{@hint(.center, text-align="center")}
+{@init(.wide, layout="full")}
+{@init(.center, text-align="center")}
 ```
 
 ### ID
@@ -30,7 +30,7 @@ A dot-prefixed name matches nodes with that CSS class.
 A hash-prefixed name matches the node with that explicit ID. Auto-generated IDs are never matched.
 
 ```markdown
-{@hint(#intro, highlight=true)}
+{@init(#intro, highlight=true)}
 ```
 
 ### Attribute
@@ -38,19 +38,19 @@ A hash-prefixed name matches the node with that explicit ID. Auto-generated IDs 
 Square brackets match on node attributes. Structural fields (like `level`, `lang`, `format`) and user-set properties are both accessible.
 
 ```markdown
-{@hint([lang="rust"], theme="dark")}
-{@hint([level=2], numbering=true)}
-{@hint([preview], border=true)}
+{@init([lang="rust"], theme="dark")}
+{@init([level=2], numbering=true)}
+{@init([preview], border=true)}
 ```
 
 `[preview]` without a value tests that the attribute exists (is set to any value).
 
 ### This
 
-The keyword `this` matches the element the hint is attached to. Use it inside brace attributes.
+The keyword `this` matches the element the init is attached to. Use it inside brace attributes.
 
 ```markdown
-## Chapter One {#ch1 {@hint(this, numbering=true)}}
+## Chapter One {#ch1 {@init(this, numbering=true)}}
 ```
 
 ## Kind Name Registry
@@ -87,7 +87,7 @@ Both descriptive kebab-case names and short aliases resolve to the same canonica
 Combine a kind with a specific ID using colon syntax.
 
 ```markdown
-{@hint(fig:arch, position="top")}
+{@init(fig:arch, position="top")}
 ```
 
 This matches the Figure node whose full ID is `fig:arch`. It is equivalent to `figure#fig:arch`.
@@ -95,7 +95,7 @@ This matches the Figure node whose full ID is `fig:arch`. It is equivalent to `f
 A wildcard `*` matches all nodes of that kind, making `fig:*` equivalent to bare `figure`:
 
 ```markdown
-{@hint(fig:*, series="figs")}
+{@init(fig:*, series="figs")}
 ```
 
 ## Compound Selectors
@@ -103,9 +103,9 @@ A wildcard `*` matches all nodes of that kind, making `fig:*` equivalent to bare
 Chain simple selectors without spaces to require all parts match (AND).
 
 ```markdown
-{@hint(figure.wide, layout="full")}
-{@hint(heading[level=2], numbering=true)}
-{@hint(heading[level=2].numbered, font-weight="bold")}
+{@init(figure.wide, layout="full")}
+{@init(heading[level=2], numbering=true)}
+{@init(heading[level=2].numbered, font-weight="bold")}
 ```
 
 `figure.wide` matches a node that is both kind Figure and has class `wide`.
@@ -117,7 +117,7 @@ Chain simple selectors without spaces to require all parts match (AND).
 Matches a node that is a direct child of the left-hand node.
 
 ```markdown
-{@hint(figure > caption, font-style="italic")}
+{@init(figure > caption, font-style="italic")}
 ```
 
 This applies `font-style="italic"` to Caption nodes that are direct children of a Figure.
@@ -127,7 +127,7 @@ This applies `font-style="italic"` to Caption nodes that are direct children of 
 Matches a node that is a descendant at any depth of the left-hand node.
 
 ```markdown
-{@hint(section ~> figure, border=true)}
+{@init(section ~> figure, border=true)}
 ```
 
 This applies `border=true` to any Figure anywhere inside a Section.
@@ -175,7 +175,7 @@ Comma means AND between attribute predicates.
 Chaining separate bracket blocks is also AND:
 
 ```markdown
-{@hint([lang="rust"][preview], theme="dark")}
+{@init([lang="rust"][preview], theme="dark")}
 ```
 
 This is equivalent to `[lang="rust", preview]`.
@@ -196,13 +196,13 @@ Comma means OR between selector expressions.
 When an attribute value is a tuple, the equality test distributes into an OR:
 
 ```markdown
-{@hint([lang=("rust", "python")], theme="dark")}
+{@init([lang=("rust", "python")], theme="dark")}
 ```
 
 `lang=("rust", "python")` expands to `lang="rust" | lang="python"`. Combined with other predicates via comma (AND inside brackets):
 
 ```markdown
-{@hint([lang=("rust", "python"), preview], theme="dark")}
+{@init([lang=("rust", "python"), preview], theme="dark")}
 ```
 
 This means: `(lang="rust" OR lang="python") AND preview`.
@@ -223,10 +223,10 @@ User-set properties from brace attributes (`{width="80%"}`) are also matchable.
 
 ## Multiple Properties
 
-A single hint can set multiple properties. Separate them with commas after the selector:
+A single init can set multiple properties. Separate them with commas after the selector:
 
 ```markdown
-{@hint(figure, layout="full", position="top")}
+{@init(figure, layout="full", position="top")}
 ```
 
 The boundary between selector and properties is the first top-level `key=value` token. Everything before it is the selector; everything after is properties.
@@ -236,29 +236,29 @@ The boundary between selector and properties is the first top-level `key=value` 
 Apply a theme to all Rust code blocks:
 
 ```markdown
-{@hint(code-block[lang="rust"], theme="dark", line-numbers=true)}
+{@init(code-block[lang="rust"], theme="dark", line-numbers=true)}
 ```
 
 Center all figures with class `hero`:
 
 ```markdown
-{@hint(figure.hero, text-align="center", width="100%")}
+{@init(figure.hero, text-align="center", width="100%")}
 ```
 
 Style captions inside figures:
 
 ```markdown
-{@hint(figure > caption, font-style="italic", color="gray")}
+{@init(figure > caption, font-style="italic", color="gray")}
 ```
 
 Match multiple kinds:
 
 ```markdown
-{@hint(figure, code-block, border=true)}
+{@init(figure, code-block, border=true)}
 ```
 
 Target code blocks in Rust or Python:
 
 ```markdown
-{@hint(code-block[lang=("rust", "python")], theme="dark")}
+{@init(code-block[lang=("rust", "python")], theme="dark")}
 ```

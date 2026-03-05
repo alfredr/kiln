@@ -274,12 +274,14 @@ pub enum AttrOp {
 /// A named resource declared in a scope.
 #[derive(Debug, Clone)]
 pub enum Declaration {
-    /// Sugar: declares a numbered series (expands to VarDecl + Init + OnDirective).
-    Series { id: String, config: SeriesConfig },
     /// A running-state variable initialization.
     VarDecl(VarDecl),
     /// A selector-triggered action rule.
     OnDirective(OnDirective),
+    /// A named group of declarations (like a function definition).
+    Def { name: String, body: Vec<Declaration>, inits: Vec<Init> },
+    /// Inline a previously defined group by name.
+    Use { name: String },
 }
 
 /// A variable initialization: name + initial value + optional format tokens.
@@ -291,9 +293,19 @@ pub struct VarDecl {
     pub cycle: bool,
 }
 
+/// When a trigger fires relative to the node's children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// Fire on visit, before children (default).
+    Enter,
+    /// Fire after children have been processed.
+    Exit,
+}
+
 /// A selector-triggered action rule.
 #[derive(Debug, Clone)]
 pub struct OnDirective {
+    pub event: Event,
     pub selector: Selector,
     pub actions: Vec<Action>,
 }
@@ -301,8 +313,14 @@ pub struct OnDirective {
 /// An action to execute when a trigger fires.
 #[derive(Debug, Clone)]
 pub enum Action {
-    /// Number: add 1. List: bump at heading depth, truncate deeper.
+    /// Increment a numeric variable by 1.
     Increment { var: String },
+    /// Decrement a numeric variable by 1.
+    Decrement { var: String },
+    /// Pop the last element from a list variable; optionally store into another variable.
+    Pop { list: String, into: Option<String> },
+    /// Push a value onto the end of a list variable.
+    Push { list: String, value: PushValue },
     /// Reset a variable to its initial value.
     Reset { var: String, to: Value },
     /// Format a running-state variable and store as a node property.
@@ -320,17 +338,13 @@ pub enum Action {
     Append { template: String },
 }
 
-/// Configuration for a series (counter/sequence manager).
+/// What to push onto a list.
 #[derive(Debug, Clone)]
-pub struct SeriesConfig {
-    /// Parent series id — inherits barriers, resets this counter on parent bump.
-    pub parent: Option<String>,
-    /// Format tokens per depth level: `["I", "1", "a"]`.
-    /// Each token is a shorthand: "1" = arabic, "I" = roman upper, "a" = alpha lower, etc.
-    /// For depths beyond the array length, repeats the last element (or cycles if `cycle` is set).
-    pub formats: Vec<String>,
-    /// Whether the format list cycles (`depth % len`) or repeats the last element.
-    pub cycle: bool,
+pub enum PushValue {
+    /// Push the current value of a named variable.
+    Var(String),
+    /// Push a literal value (e.g. 0).
+    Literal(Value),
 }
 
 /// Number formatting style for a single counter level.

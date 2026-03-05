@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Action, Declaration, Document, FormatToken, Init, Node, NodeKind, OnDirective,
-    RawBlockCompiler, Selector, Value,
+    Action, Declaration, Document, Event, FormatToken, Init, Node, NodeKind, OnDirective,
+    PushValue, RawBlockCompiler, Selector, Value,
 };
 use crate::selector::{NodeSnapshot, matches_selector};
 use crate::visit::Pass;
@@ -154,6 +154,7 @@ impl Pass for ExecuteProgram {
         let mut var_meta: HashMap<String, VarMeta> = HashMap::new();
         let mut triggers: Vec<OnDirective> = Vec::new();
         let mut label_map: HashMap<String, LabelEntry> = HashMap::new();
+        let mut defs: Defs = HashMap::new();
 
         program_walk(
             &mut doc.content,
@@ -161,6 +162,7 @@ impl Pass for ExecuteProgram {
             &mut var_meta,
             &mut triggers,
             &mut label_map,
+            &mut defs,
             &[],
         );
 
@@ -178,9 +180,10 @@ fn has_program_declarations(node: &Node) -> bool {
     if node.attrs.declarations.iter().any(|d| {
         matches!(
             d,
-            Declaration::Series { .. }
-                | Declaration::VarDecl(_)
+            Declaration::VarDecl(_)
                 | Declaration::OnDirective(_)
+                | Declaration::Def { .. }
+                | Declaration::Use { .. }
         )
     }) {
         return true;
@@ -188,66 +191,102 @@ fn has_program_declarations(node: &Node) -> bool {
     node.children.iter().any(has_program_declarations)
 }
 
+/// Named definition registry carried through the walk.
+type Defs = HashMap<String, (Vec<Declaration>, Vec<Init>)>;
+
 fn program_walk(
     node: &mut Node,
     state: &mut WalkState,
     var_meta: &mut HashMap<String, VarMeta>,
     triggers: &mut Vec<OnDirective>,
     label_map: &mut HashMap<String, LabelEntry>,
+    defs: &mut Defs,
     ancestors: &[NodeSnapshot],
 ) {
-    // 1. Initialize variables from declarations on this node.
+    // 1. Process declarations on this node.
     let decls = node.attrs.declarations.clone();
-    for decl in &decls {
-        match decl {
-            Declaration::VarDecl(vd) => {
-                state.entry(vd.name.clone()).or_insert_with(|| vd.value.clone());
-                var_meta.entry(vd.name.clone()).or_insert_with(|| VarMeta {
-                    initial: vd.value.clone(),
-                    formats: vd.formats.iter().map(|f| FormatToken::parse(f)).collect(),
-                    cycle: vd.cycle,
-                });
-            }
-            Declaration::Series { id, config } => {
-                // Series compat: initialize as Number(0) or List([]) based on format count
-                let initial = if config.formats.len() > 1 {
-                    Value::List(vec![])
-                } else {
-                    Value::Number(0.0)
-                };
-                state.entry(id.clone()).or_insert_with(|| initial.clone());
-                var_meta.entry(id.clone()).or_insert_with(|| VarMeta {
-                    initial,
-                    formats: config
-                        .formats
-                        .iter()
-                        .map(|f| FormatToken::parse(f))
-                        .collect(),
-                    cycle: config.cycle,
-                });
-            }
-            Declaration::OnDirective(on) => {
-                triggers.push(on.clone());
-            }
-        }
-    }
+    process_declarations(&decls, state, var_meta, triggers, defs, &mut node.attrs.inits);
 
-    // 2. Fire matching triggers in declaration order.
+    // 2. Fire matching Enter triggers in declaration order.
     let snap = NodeSnapshot::from_node(node);
     let trigger_snapshot = triggers.clone();
-    for trigger in &trigger_snapshot {
-        if matches_selector(&trigger.selector, node, ancestors) {
-            for action in &trigger.actions {
-                execute_action(action, node, state, var_meta, label_map);
-            }
-        }
-    }
+    fire_triggers(Event::Enter, &trigger_snapshot, node, ancestors, state, var_meta, label_map);
 
     // 3. Recurse — children see (and modify) the running state.
     let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
     child_ancestors.push(snap);
     for child in &mut node.children {
-        program_walk(child, state, var_meta, triggers, label_map, &child_ancestors);
+        program_walk(child, state, var_meta, triggers, label_map, defs, &child_ancestors);
+    }
+
+    // 4. Fire matching Exit triggers after children.
+    let trigger_snapshot = triggers.clone();
+    fire_triggers(Event::Exit, &trigger_snapshot, node, ancestors, state, var_meta, label_map);
+}
+
+fn fire_triggers(
+    event: Event,
+    triggers: &[OnDirective],
+    node: &mut Node,
+    ancestors: &[NodeSnapshot],
+    state: &mut WalkState,
+    var_meta: &HashMap<String, VarMeta>,
+    label_map: &mut HashMap<String, LabelEntry>,
+) {
+    for trigger in triggers {
+        if trigger.event != event || !matches_selector(&trigger.selector, node, ancestors) {
+            continue;
+        }
+        for action in &trigger.actions {
+            execute_action(action, node, state, var_meta, label_map);
+        }
+    }
+}
+
+/// Process a list of declarations: register vars, triggers, defs, and expand uses.
+fn process_declarations(
+    decls: &[Declaration],
+    state: &mut WalkState,
+    var_meta: &mut HashMap<String, VarMeta>,
+    triggers: &mut Vec<OnDirective>,
+    defs: &mut Defs,
+    inits: &mut Vec<Init>,
+) {
+    for decl in decls {
+        process_one_declaration(decl, state, var_meta, triggers, defs, inits);
+    }
+}
+
+fn process_one_declaration(
+    decl: &Declaration,
+    state: &mut WalkState,
+    var_meta: &mut HashMap<String, VarMeta>,
+    triggers: &mut Vec<OnDirective>,
+    defs: &mut Defs,
+    inits: &mut Vec<Init>,
+) {
+    match decl {
+        Declaration::VarDecl(vd) => {
+            state.entry(vd.name.clone()).or_insert_with(|| vd.value.clone());
+            var_meta.entry(vd.name.clone()).or_insert_with(|| VarMeta {
+                initial: vd.value.clone(),
+                formats: vd.formats.iter().map(|f| FormatToken::parse(f)).collect(),
+                cycle: vd.cycle,
+            });
+        }
+        Declaration::OnDirective(on) => {
+            triggers.push(on.clone());
+        }
+        Declaration::Def { name, body, inits: def_inits } => {
+            defs.insert(name.clone(), (body.clone(), def_inits.clone()));
+        }
+        Declaration::Use { name } => {
+            let Some((body, def_inits)) = defs.get(name).cloned() else {
+                return;
+            };
+            inits.extend(def_inits);
+            process_declarations(&body, state, var_meta, triggers, defs, inits);
+        }
     }
 }
 
@@ -261,25 +300,30 @@ fn execute_action(
 ) {
     match action {
         Action::Increment { var } => {
-            if let Some(val) = state.get_mut(var) {
-                match val {
-                    Value::Number(n) => *n += 1.0,
-                    Value::List(counts) => {
-                        // Hierarchical: bump at heading depth, truncate deeper.
-                        let level = match &node.kind {
-                            NodeKind::Heading { level } => *level as usize,
-                            _ => 1,
-                        };
-                        while counts.len() < level {
-                            counts.push(Value::Number(0.0));
-                        }
-                        if let Some(Value::Number(n)) = counts.get_mut(level - 1) {
-                            *n += 1.0;
-                        }
-                        counts.truncate(level);
-                    }
-                    _ => {}
-                }
+            if let Some(Value::Number(n)) = state.get_mut(var) {
+                *n += 1.0;
+            }
+        }
+        Action::Decrement { var } => {
+            if let Some(Value::Number(n)) = state.get_mut(var) {
+                *n -= 1.0;
+            }
+        }
+        Action::Pop { list, into } => {
+            if let Some(Value::List(items)) = state.get_mut(list)
+                && let Some(popped) = items.pop()
+                && let Some(target) = into
+            {
+                state.insert(target.clone(), popped);
+            }
+        }
+        Action::Push { list, value } => {
+            let push_val = match value {
+                PushValue::Var(name) => state.get(name).cloned().unwrap_or(Value::Number(0.0)),
+                PushValue::Literal(v) => v.clone(),
+            };
+            if let Some(Value::List(items)) = state.get_mut(list) {
+                items.push(push_val);
             }
         }
         Action::Reset { var, to } => {
@@ -294,46 +338,8 @@ fn execute_action(
             };
             state.insert(var.clone(), reset_val);
         }
-        Action::StoreFormatted {
-            var,
-            property,
-            formats,
-            cycle,
-        } => {
-            if let Some(val) = state.get(var) {
-                // Use action-level formats if provided, otherwise fall back to var_meta
-                let (effective_formats, effective_cycle) = if !formats.is_empty() {
-                    (formats.as_slice(), *cycle)
-                } else if let Some(meta) = var_meta.get(var) {
-                    (meta.formats.as_slice(), meta.cycle)
-                } else {
-                    (&[] as &[FormatToken], false)
-                };
-                let number = format_value(val, effective_formats, effective_cycle);
-                node.attrs
-                    .properties
-                    .insert(property.clone(), Value::Text(number.clone()));
-
-                // Build label map entry for cross-refs.
-                if !node.attrs.auto_id {
-                    let label_template = node
-                        .attrs
-                        .properties
-                        .get("label")
-                        .and_then(|v| match v {
-                            Value::Text(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    label_map.insert(
-                        node.attrs.id.clone(),
-                        LabelEntry {
-                            number,
-                            label_template,
-                        },
-                    );
-                }
-            }
+        Action::StoreFormatted { .. } => {
+            store_formatted(action, node, state, var_meta, label_map);
         }
         Action::SetProperty { property, value } => {
             node.attrs
@@ -351,6 +357,58 @@ fn execute_action(
     }
 }
 
+fn store_formatted(
+    action: &Action,
+    node: &mut Node,
+    state: &WalkState,
+    var_meta: &HashMap<String, VarMeta>,
+    label_map: &mut HashMap<String, LabelEntry>,
+) {
+    let Action::StoreFormatted {
+        var,
+        property,
+        formats,
+        cycle,
+    } = action
+    else {
+        return;
+    };
+    let Some(val) = state.get(var) else { return };
+    // Use action-level formats if provided, otherwise fall back to var_meta
+    let (effective_formats, effective_cycle) = if !formats.is_empty() {
+        (formats.as_slice(), *cycle)
+    } else if let Some(meta) = var_meta.get(var) {
+        (meta.formats.as_slice(), meta.cycle)
+    } else {
+        (&[] as &[FormatToken], false)
+    };
+    let number = format_value(val, effective_formats, effective_cycle);
+    node.attrs
+        .properties
+        .insert(property.to_string(), Value::Text(number.clone()));
+
+    // Build label map entry for cross-refs.
+    if node.attrs.auto_id {
+        return;
+    }
+    let label_template = node
+        .attrs
+        .properties
+        .get("label")
+        .and_then(|v| match v {
+            Value::Text(s) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    label_map.insert(
+        node.attrs.id.clone(),
+        LabelEntry {
+            number,
+            label_template,
+        },
+    );
+}
+
 /// Format a Value using format tokens.
 fn format_value(val: &Value, formats: &[FormatToken], cycle: bool) -> String {
     match val {
@@ -363,13 +421,7 @@ fn format_value(val: &Value, formats: &[FormatToken], cycle: bool) -> String {
             fmt.render(*n as u32)
         }
         Value::List(counts) => {
-            // Skip leading zeros — handles documents where top-level headings
-            // (e.g. h1) are absent from content (provided by template instead).
-            let start = counts
-                .iter()
-                .position(|v| !matches!(v, Value::Number(n) if *n == 0.0))
-                .unwrap_or(0);
-            counts[start..]
+            counts
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
@@ -377,7 +429,7 @@ fn format_value(val: &Value, formats: &[FormatToken], cycle: bool) -> String {
                         Value::Number(n) => *n as u32,
                         _ => 0,
                     };
-                    let fmt = get_format_at(formats, start + i, cycle);
+                    let fmt = get_format_at(formats, i, cycle);
                     fmt.render(n)
                 })
                 .collect::<Vec<_>>()
@@ -405,30 +457,33 @@ fn interpolate_template(template: &str, properties: &HashMap<String, Value>) -> 
     let mut result = String::new();
     let mut chars = template.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == '{' {
-            let mut key = String::new();
-            while let Some(&c) = chars.peek() {
-                if c == '}' {
-                    chars.next();
-                    break;
-                }
-                key.push(c);
-                chars.next();
-            }
-            if let Some(val) = properties.get(&key) {
-                match val {
-                    Value::Text(s) => result.push_str(s),
-                    Value::Number(n) => result.push_str(&n.to_string()),
-                    Value::Bool(b) => result.push_str(&b.to_string()),
-                    _ => {}
-                }
-            }
-            // Missing key → empty string (by design)
-        } else {
+        if ch != '{' {
             result.push(ch);
+            continue;
+        }
+        let key = read_until_close_brace(&mut chars);
+        // Missing key → empty string (by design)
+        match properties.get(&key) {
+            Some(Value::Text(s)) => result.push_str(s),
+            Some(Value::Number(n)) => result.push_str(&n.to_string()),
+            Some(Value::Bool(b)) => result.push_str(&b.to_string()),
+            _ => {}
         }
     }
     result
+}
+
+fn read_until_close_brace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut key = String::new();
+    while let Some(&c) = chars.peek() {
+        if c == '}' {
+            chars.next();
+            break;
+        }
+        key.push(c);
+        chars.next();
+    }
+    key
 }
 
 // ── Legacy compat aliases ──
@@ -813,7 +868,9 @@ mod tests {
     fn flat_counter_figures() {
         reset_id_counter();
         let input = "\
-{@series(fig, counts=figure)}
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
 {@hint(figure, label=\"Figure {n}\")}
 
 ![First](a.png){#fig:first}
@@ -831,20 +888,33 @@ mod tests {
         assert_eq!(get_number(figs[2]), Some("3"));
     }
 
+    /// Hierarchical numbering preamble using @var/@on primitives.
+    /// Uses format tokens `fmts` (e.g. `["I","1"]`).
+    fn hierarchical_preamble(fmts: &[&str], cycle: bool) -> String {
+        let fmt_str = fmts
+            .iter()
+            .map(|f| format!("\"{}\"", f))
+            .collect::<Vec<_>>()
+            .join(",");
+        let cycle_str = if cycle { ", cycle=true" } else { "" };
+        format!(
+            r#"{{@var(index, [0], format=[{fmt_str}]{cycle_str})}}
+{{@var(val, 0)}}
+{{@init(heading, series="index")}}
+{{@on(enter, section > section, @pop(index, val), @inc(val), @push(index, val), @push(index, 0))}}
+{{@on(exit, section > section, @pop(index))}}
+{{@on([series="index"], @pop(index, val), @store(number, index), @push(index, val))}}"#
+        )
+    }
+
     #[test]
     fn hierarchical_section_numbering() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-
-# Introduction {#sec:intro}
-
-## Background {#sec:bg}
-
-## Methods {#sec:methods}
-
-# Results {#sec:results}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n# Introduction {{#sec:intro}}\n\n## Background {{#sec:bg}}\n\n## Methods {{#sec:methods}}\n\n# Results {{#sec:results}}",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -858,21 +928,21 @@ mod tests {
     #[test]
     fn figure_counter_resets_with_parent() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-{@series(fig, counts=figure, parent=sec, formats=[\"1\"])}
-{@hint(figure, label=\"Figure {n}\")}
-
-# Chapter One
-
-![A](a.png){#fig:a}
-
-![B](b.png){#fig:b}
-
-# Chapter Two
-
-![C](c.png){#fig:c}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{preamble}\n\
+{{@var(fig, 0, format=\"1\")}}\n\
+{{@init(figure, series=\"fig\")}}\n\
+{{@on([series=\"fig\"], @inc(fig), @store(number, fig))}}\n\
+{{@on(enter, section > section, @reset(fig))}}\n\
+{{@hint(figure, label=\"Figure {{n}}\")}}\n\n\
+# Chapter One\n\n\
+![A](a.png){{#fig:a}}\n\n\
+![B](b.png){{#fig:b}}\n\n\
+# Chapter Two\n\n\
+![C](c.png){{#fig:c}}",
+            preamble = hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
@@ -887,7 +957,9 @@ mod tests {
     fn cross_ref_forward_and_backward() {
         reset_id_counter();
         let input = "\
-{@series(fig, counts=figure)}
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
 {@hint(figure, label=\"Figure {n}\")}
 
 See @fig:second for details.
@@ -943,7 +1015,9 @@ As shown in @fig:first above.";
     fn cross_ref_no_label_shows_number() {
         reset_id_counter();
         let input = "\
-{@series(fig, counts=figure)}
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
 
 ![Pic](a.png){#fig:pic}
 
@@ -990,17 +1064,11 @@ See @fig:pic.";
     #[test]
     fn hierarchical_three_levels() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\",\"a\"])}
-
-# Chapter {#ch1}
-
-## Section {#s1}
-
-### Sub {#sub1}
-
-## Section Two {#s2}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n# Chapter {{#ch1}}\n\n## Section {{#s1}}\n\n### Sub {{#sub1}}\n\n## Section Two {{#s2}}",
+            hierarchical_preamble(&["I", "1", "a"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1015,15 +1083,11 @@ See @fig:pic.";
     fn format_repeat_last() {
         reset_id_counter();
         // formats=["I","1"] with 3 levels — depth 3 should use "1" (repeat last).
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-
-# Top {#t}
-
-## Mid {#m}
-
-### Deep {#d}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n# Top {{#t}}\n\n## Mid {{#m}}\n\n### Deep {{#d}}",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1125,8 +1189,12 @@ See @fig:pic.";
     fn multiple_series_independent() {
         reset_id_counter();
         let input = "\
-{@series(fig, counts=figure)}
-{@series(tbl, counts=table)}
+{@var(fig, 0, format=\"1\")}
+{@var(tbl, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@init(table, series=\"tbl\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
+{@on([series=\"tbl\"], @inc(tbl), @store(number, tbl))}
 {@hint(figure, label=\"Figure {n}\")}
 
 ![A](a.png){#fig:a}
@@ -1147,17 +1215,11 @@ See @fig:pic.";
     fn series_format_cycling() {
         reset_id_counter();
         // Use cycle=true with 2 formats over 4 heading levels
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"a\"], cycle=true)}
-
-# Ch {#c1}
-
-## S {#s1}
-
-### Sub {#sub1}
-
-#### Deep {#d1}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n# Ch {{#c1}}\n\n## S {{#s1}}\n\n### Sub {{#sub1}}\n\n#### Deep {{#d1}}",
+            hierarchical_preamble(&["I", "a"], true)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1184,10 +1246,10 @@ See @fig:pic.";
     }
 
     #[test]
-    fn has_series_declarations_nested() {
+    fn has_declarations_nested() {
         reset_id_counter();
-        // Series declared inside a subsection
-        let input = "# Chapter\n\n{@series(fig, counts=figure)}\n\n![A](a.png){#fig:a}";
+        // Counter declared inside a subsection
+        let input = "# Chapter\n\n{@var(fig, 0, format=\"1\")}\n{@init(figure, series=\"fig\")}\n{@on([series=\"fig\"], @inc(fig), @store(number, fig))}\n\n![A](a.png){#fig:a}";
         let mut doc = parse(input).unwrap();
         resolve_document(&mut doc);
 
@@ -1271,7 +1333,7 @@ See @fig:pic.";
     #[test]
     fn hoist_transfers_declarations() {
         reset_id_counter();
-        let input = "{@series(fig, counts=figure)}";
+        let input = "{@var(fig, 0, format=\"1\")}";
         let mut doc = parse(input).unwrap();
         HoistDirectives.run(&mut doc);
         let has_decls = !doc.content.attrs.declarations.is_empty()
@@ -1404,27 +1466,27 @@ See @fig:pic.";
         assert!(compiled.is_some());
     }
 
-    // ── Series with parent + child reset ──
+    // ── Parent + child reset ──
 
     #[test]
-    fn series_parent_child_reset() {
+    fn parent_child_reset() {
         reset_id_counter();
-        // Parent series must be hierarchical (>1 format) for bump_depth to reset children
-        let input = "\
-{@series(ch, counts=heading, formats=[\"I\",\"1\"])}
-{@series(fig, counts=figure, parent=ch)}
-{@hint(figure, label=\"Figure {n}\")}
-
-# Chapter 1 {#ch1}
-
-![A](a.png){#fig:a}
-
-![B](b.png){#fig:b}
-
-# Chapter 2 {#ch2}
-
-![C](c.png){#fig:c}";
-        let mut doc = parse(input).unwrap();
+        // Hierarchical heading counter + flat figure counter that resets on section enter
+        let input = format!(
+            "{preamble}\n\
+{{@var(fig, 0, format=\"1\")}}\n\
+{{@init(figure, series=\"fig\")}}\n\
+{{@on([series=\"fig\"], @inc(fig), @store(number, fig))}}\n\
+{{@on(enter, section > section, @reset(fig))}}\n\
+{{@hint(figure, label=\"Figure {{n}}\")}}\n\n\
+# Chapter 1 {{#ch1}}\n\n\
+![A](a.png){{#fig:a}}\n\n\
+![B](b.png){{#fig:b}}\n\n\
+# Chapter 2 {{#ch2}}\n\n\
+![C](c.png){{#fig:c}}",
+            preamble = hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
@@ -1487,19 +1549,11 @@ See @fig:pic.";
     #[test]
     fn var_and_on_hierarchical() {
         reset_id_counter();
-        let input = "\
-{@var(sec, [], format=[\"I\",\"1\"])}
-{@init(heading, series=\"sec\")}
-{@on([series=\"sec\"], @inc(sec), @store(number, sec))}
-
-# Introduction
-
-## Background
-
-## Methods
-
-# Results";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n# Introduction\n\n## Background\n\n## Methods\n\n# Results",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1511,49 +1565,40 @@ See @fig:pic.";
     }
 
     #[test]
-    fn hierarchical_skips_leading_zeros_when_h1_absent() {
+    fn section_nesting_drives_numbering_without_h1() {
+        // When h1 is absent, sections start at level 2 directly under root.
+        // Numbering is driven by section nesting, not heading level.
         reset_id_counter();
-        let input = "\
-{@var(sec, [], format=[\"I\",\"1\"])}
-{@init(heading, series=\"sec\")}
-{@on([series=\"sec\"], @inc(sec), @store(number, sec))}
-
-## Background
-
-## Methods
-
-### Detail";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n\n## Background\n\n## Methods",
+            hierarchical_preamble(&["1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
-        assert_eq!(headings.len(), 3);
-        // Leading zero at depth 0 (no h1 seen) is skipped
+        assert_eq!(headings.len(), 2);
         assert_eq!(get_number(headings[0]), Some("1"));
         assert_eq!(get_number(headings[1]), Some("2"));
-        assert_eq!(get_number(headings[2]), Some("2.1"));
     }
 
     #[test]
     fn on_reset() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-{@var(fig, 0, format=\"1\")}
-{@init(figure, series=\"fig\")}
-{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
-{@on([series=\"sec\"], @reset(fig))}
-
-# Chapter One
-
-![A](a.png){#fig:a}
-
-![B](b.png){#fig:b}
-
-# Chapter Two
-
-![C](c.png){#fig:c}";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{preamble}\n\
+{{@var(fig, 0, format=\"1\")}}\n\
+{{@init(figure, series=\"fig\")}}\n\
+{{@on([series=\"fig\"], @inc(fig), @store(number, fig))}}\n\
+{{@on(enter, section > section, @reset(fig))}}\n\n\
+# Chapter One\n\n\
+![A](a.png){{#fig:a}}\n\n\
+![B](b.png){{#fig:b}}\n\n\
+# Chapter Two\n\n\
+![C](c.png){{#fig:c}}",
+            preamble = hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
@@ -1584,12 +1629,11 @@ See @fig:pic.";
     #[test]
     fn on_prepend() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-{@on(heading, @prepend(@text(\"{number}. \")))}
-
-# Introduction";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n{{@on(heading, @prepend(@text(\"{{number}}. \")))}}\n\n# Introduction",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1606,12 +1650,11 @@ See @fig:pic.";
     #[test]
     fn on_append() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-{@on(heading, @append(@text(\" §\")))}
-
-# Introduction";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n{{@on(heading, @append(@text(\" §\")))}}\n\n# Introduction",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1628,14 +1671,11 @@ See @fig:pic.";
     #[test]
     fn content_sugar() {
         reset_id_counter();
-        let input = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
-{@content(heading, \"{number}. \")}
-
-# Introduction
-
-## Background";
-        let mut doc = parse(input).unwrap();
+        let input = format!(
+            "{}\n{{@content(heading, \"{{number}}. \")}}\n\n# Introduction\n\n## Background",
+            hierarchical_preamble(&["I", "1"], false)
+        );
+        let mut doc = parse(&input).unwrap();
         resolve_document(&mut doc);
 
         let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
@@ -1674,39 +1714,246 @@ See @fig:pic.";
         }
     }
 
+    // ── Push/Pop/Exit engine tests ──
+
     #[test]
-    fn series_expands_to_primitives() {
-        // @series(fig, counts=figure) should produce the same result
-        // as manual @var + @init + @on
+    fn pop_push_inc_on_list() {
+        // Direct push/pop/inc operations via @var/@on
         reset_id_counter();
-        let input_series = "\
-{@series(fig, counts=figure)}
+        let input = "\
+{@var(idx, [0], format=[\"1\"])}
+{@var(v, 0)}
+{@init(heading, series=\"idx\")}
+{@on([series=\"idx\"], @pop(idx, v), @inc(v), @push(idx, v), @store(number, idx))}
 
-![A](a.png){#fig:a}
+# One
 
-![B](b.png){#fig:b}";
-        let mut doc_series = parse(input_series).unwrap();
-        resolve_document(&mut doc_series);
+# Two
 
-        let figs_series = find_all(&doc_series.content, |n| matches!(n.kind, NodeKind::Figure));
-        assert_eq!(get_number(figs_series[0]), Some("1"));
-        assert_eq!(get_number(figs_series[1]), Some("2"));
+# Three";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
 
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 3);
+        // Each heading pops 0, incs to 1/2/3, pushes back
+        assert_eq!(get_number(headings[0]), Some("1"));
+        assert_eq!(get_number(headings[1]), Some("2"));
+        assert_eq!(get_number(headings[2]), Some("3"));
+    }
+
+    #[test]
+    fn exit_actions_fire_after_children() {
+        // @on(exit, section) should fire after children are processed
         reset_id_counter();
-        let input_manual = "\
-{@var(fig, 0, format=\"1\")}
-{@init(figure, series=\"fig\")}
-{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
+        let input = "\
+{@var(depth, 0)}
+{@on(enter, section > section, @inc(depth))}
+{@on(exit, section > section, @dec(depth))}
+{@on(heading, @store(number, depth))}
 
-![A](a.png){#fig:a}
+# One
 
-![B](b.png){#fig:b}";
-        let mut doc_manual = parse(input_manual).unwrap();
-        resolve_document(&mut doc_manual);
+## Nested";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
 
-        let figs_manual = find_all(&doc_manual.content, |n| matches!(n.kind, NodeKind::Figure));
-        assert_eq!(get_number(figs_manual[0]), Some("1"));
-        assert_eq!(get_number(figs_manual[1]), Some("2"));
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        // h1 fires after section(1) enters (depth=1)
+        assert_eq!(get_number(headings[0]), Some("1"));
+        // h2 fires after section(2) enters (depth=2)
+        assert_eq!(get_number(headings[1]), Some("2"));
+    }
+
+    #[test]
+    fn pop_discard() {
+        // @pop(list) without target discards the value
+        reset_id_counter();
+        let input = "\
+{@var(stk, [0], format=[\"1\"])}
+{@var(v, 0)}
+{@on(heading, @push(stk, 99))}
+{@on(figure, @pop(stk), @store(number, stk))}
+
+# Heading
+
+![img](x.png)";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        // stack was [0], heading pushed 99 → [0, 99], figure pops 99 (discard) → [0]
+        assert_eq!(get_number(figs[0]), Some("0"));
+    }
+
+    #[test]
+    fn def_and_use_basic() {
+        use crate::parse::parse_prelude;
+
+        let prelude = "\
+@def(counter) {
+  @var(n, 0);
+  @on(enter, heading, @inc(n), @store(number, n));
+}
+@use(counter);
+";
+        let (decls, _inits): (Vec<Declaration>, _) = parse_prelude(prelude);
+        // Should have Def and Use declarations
+        assert!(decls.iter().any(|d| matches!(d, Declaration::Def { .. })));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::Use { .. })));
+    }
+
+    #[test]
+    fn block_syntax_parsing() {
+        use crate::parse::parse_prelude;
+
+        let prelude = "\
+@var(x, 0);
+@on(enter, heading) {
+  @inc(x);
+  @store(number, x);
+}
+";
+        let (decls, _inits): (Vec<Declaration>, _) = parse_prelude(prelude);
+        assert!(decls.iter().any(|d| matches!(d, Declaration::VarDecl(_))));
+        assert!(decls.iter().any(|d| matches!(d, Declaration::OnDirective(_))));
+    }
+
+    // ── Prelude integration tests ──
+
+    /// Inject prelude declarations onto a document root, mimicking InjectPrelude.
+    fn inject_prelude(doc: &mut crate::ast::Document, prelude_text: &str) {
+        use crate::parse::parse_prelude;
+        let (decls, inits) = parse_prelude(prelude_text);
+        doc.content.attrs.declarations.extend(decls);
+        doc.content.attrs.inits.extend(inits);
+    }
+
+    const PRELUDE: &str = r#"
+@def(numbering) {
+  @var(fig, 0);
+  @var(index, [0], format=["I","1"]);
+  @var(val, 0);
+
+  @on(enter, section > section) {
+    @pop(index, val);
+    @inc(val);
+    @push(index, val);
+    @push(index, 0);
+  }
+
+  @on(exit, section > section) {
+    @pop(index);
+  }
+
+  @on(enter, heading) {
+    @pop(index, val);
+    @store(number, index);
+    @push(index, val);
+  }
+
+  @on(enter, figure) {
+    @inc(fig);
+    @store(number, fig);
+  }
+}
+
+@use(numbering);
+@init(figure, label="Figure {n}");
+@init(heading, label="Section {n}");
+"#;
+
+    #[test]
+    fn prelude_numbering_integration() {
+        reset_id_counter();
+        let md = "\
+# Introduction {#sec:intro}
+
+## Background {#sec:bg}
+
+## Methods {#sec:methods}
+
+# Results {#sec:results}";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        assert_eq!(get_number(headings[0]), Some("I"), "Introduction = I");
+        assert_eq!(get_number(headings[1]), Some("I.1"), "Background = I.1");
+        assert_eq!(get_number(headings[2]), Some("I.2"), "Methods = I.2");
+        assert_eq!(get_number(headings[3]), Some("II"), "Results = II");
+    }
+
+    #[test]
+    fn prelude_figures() {
+        reset_id_counter();
+        let md = "\
+![First](a.png){#fig:first}
+
+![Second](b.png){#fig:second}
+
+![Third](c.png){#fig:third}";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        assert_eq!(get_number(figs[2]), Some("3"));
+    }
+
+    #[test]
+    fn prelude_deep_nesting() {
+        reset_id_counter();
+        let md = "\
+# Part {#p1}
+
+## Chapter {#c1}
+
+### Section {#s1}
+
+## Chapter Two {#c2}";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        assert_eq!(get_number(headings[0]), Some("I"), "Part = I");
+        assert_eq!(get_number(headings[1]), Some("I.1"), "Chapter = I.1");
+        assert_eq!(get_number(headings[2]), Some("I.1.1"), "Section = I.1.1");
+        assert_eq!(get_number(headings[3]), Some("I.2"), "Chapter Two = I.2");
+    }
+
+    #[test]
+    fn prelude_cross_ref_labels() {
+        reset_id_counter();
+        let md = "\
+# Intro {#sec:intro}
+
+![Diagram](d.png){#fig:d}
+
+See @sec:intro and @fig:d.";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        let refs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        assert_eq!(refs.len(), 2);
+        let sec_text = refs[0].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(sec_text, Some("Section I"));
+        let fig_text = refs[1].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(fig_text, Some("Figure 1"));
     }
 
 }

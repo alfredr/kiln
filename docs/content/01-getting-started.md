@@ -93,33 +93,4 @@ To include draft posts in the preview, pass the `--drafts` flag:
 kiln dev --drafts
 ```
 
-## CLI Reference
-
-Below is a summary of kiln's commands and flags.
-
-### Global Flags
-
-| Flag | Description |
-| --- | --- |
-| `--root <PATH>` | Set the project root directory. Defaults to the current working directory. |
-
-### Commands
-
-| Command | Description |
-| --- | --- |
-| `kiln init <NAME>` | Scaffold a new site in a directory called `<NAME>`. |
-| `kiln build` | Build the site and write output to `dist/`. |
-| `kiln dev` | Start the development server with live reload. |
-
-### `kiln build` Flags
-
-| Flag | Description |
-| --- | --- |
-| `--drafts` | Include posts marked as drafts in the output. |
-
-### `kiln dev` Flags
-
-| Flag | Description |
-| --- | --- |
-| `--port <N>` | Port for the dev server (default: 3000). |
-| `--drafts` | Include posts marked as drafts in the preview. |
+For the full list of CLI flags and configuration options, see [Configuration](/configuration/).

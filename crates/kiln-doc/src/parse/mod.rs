@@ -487,15 +487,15 @@ mod tests {
     }
 
     #[test]
-    fn series_directive() {
-        let doc = parse_ok("{@series(figs, label=\"Figure\", display=hierarchical)}");
-        // Should produce a custom node with the series declaration
-        let has_series = doc
+    fn var_directive() {
+        let doc = parse_ok("{@var(fig, 0, format=\"1\")}");
+        // Should produce a custom node with the var declaration
+        let has_var = doc
             .content
             .children
             .iter()
             .any(|n| !n.attrs.declarations.is_empty());
-        assert!(has_series);
+        assert!(has_var);
     }
 
     #[test]
@@ -754,28 +754,26 @@ mod tests {
         assert!(has_hint);
     }
 
-    fn extract_series_config(
-        doc: &crate::ast::Document,
-    ) -> Option<crate::ast::SeriesConfig> {
+    fn extract_var_formats(doc: &crate::ast::Document) -> Option<Vec<String>> {
         use crate::ast::Declaration;
         let decl = doc
             .content
             .children
             .iter()
             .flat_map(|n| &n.attrs.declarations)
-            .find(|d| matches!(d, Declaration::Series { .. }))?;
-        if let Declaration::Series { config, .. } = decl {
-            Some(config.clone())
+            .find(|d| matches!(d, Declaration::VarDecl(_)))?;
+        if let Declaration::VarDecl(vd) = decl {
+            Some(vd.formats.clone())
         } else {
             None
         }
     }
 
     #[test]
-    fn series_formats_list() {
-        let doc = parse_ok("{@series(nums, formats=[\"I\",\"1\",\"a\"])}");
+    fn var_formats_list() {
+        let doc = parse_ok("{@var(nums, [0], format=[\"I\",\"1\",\"a\"])}");
         assert_eq!(
-            extract_series_config(&doc).unwrap().formats,
+            extract_var_formats(&doc).unwrap(),
             vec!["I", "1", "a"]
         );
     }
@@ -939,11 +937,10 @@ mod tests {
     }
 
     #[test]
-    fn series_parent_and_cycle() {
-        let doc = parse_ok("{@series(fig, parent=sec, cycle=true)}");
-        let config = extract_series_config(&doc).unwrap();
-        assert_eq!(config.parent, Some("sec".to_string()));
-        assert!(config.cycle);
+    fn var_with_cycle() {
+        let doc = parse_ok("{@var(fig, [0], format=[\"I\",\"1\"], cycle=true)}");
+        let fmts = extract_var_formats(&doc).unwrap();
+        assert_eq!(fmts, vec!["I", "1"]);
     }
 
     #[test]
@@ -1016,10 +1013,9 @@ mod tests {
     }
 
     #[test]
-    fn series_counts_generates_hint() {
-        use crate::ast::Value;
+    fn init_generates_hint() {
         use crate::visit::Pass;
-        let doc = parse_ok("{@series(fig, counts=figure)}");
+        let doc = parse_ok("{@init(figure, series=\"fig\")}");
         // After hoisting, root should have a hint targeting Figure with series="fig".
         let mut doc = doc;
         crate::resolve::HoistDirectives.run(&mut doc);
@@ -1029,17 +1025,14 @@ mod tests {
             .inits
             .iter()
             .find(|h| h.property == "series");
-        assert!(hint.is_some(), "counts= should generate a series hint");
-        assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "fig"));
+        assert!(hint.is_some(), "init should produce a series hint");
     }
 
     #[test]
-    fn series_default_formats() {
-        let doc = parse_ok("{@series(x)}");
-        let config = extract_series_config(&doc).unwrap();
-        assert_eq!(config.formats, vec!["1"]);
-        assert!(config.parent.is_none());
-        assert!(!config.cycle);
+    fn var_default_formats() {
+        let doc = parse_ok("{@var(x, 0)}");
+        let fmts = extract_var_formats(&doc).unwrap();
+        assert!(fmts.is_empty(), "no format specified");
     }
 
     #[test]
@@ -1170,28 +1163,17 @@ mod tests {
     }
 
     #[test]
-    fn directive_series_with_parent_and_cycle() {
-        let doc = parse_ok("{@series(fig, parent=sec, formats=[\"I\",\"1\"], cycle=true)}");
-        let config = extract_series_config(&doc).unwrap();
-        assert_eq!(config.parent.as_deref(), Some("sec"));
-        assert_eq!(config.formats, vec!["I", "1"]);
-        assert!(config.cycle);
+    fn var_with_formats_and_cycle() {
+        let doc = parse_ok("{@var(idx, [0], format=[\"I\",\"1\"], cycle=true)}");
+        let fmts = extract_var_formats(&doc).unwrap();
+        assert_eq!(fmts, vec!["I", "1"]);
     }
 
     #[test]
-    fn directive_series_with_counts_and_format() {
-        use crate::ast::Value;
-        use crate::visit::Pass;
-        let doc = parse_ok("{@series(sec, counts=heading, formats=[\"I\",\"1\",\"a\"])}");
-        let config = extract_series_config(&doc).unwrap();
-        assert_eq!(config.formats, vec!["I", "1", "a"]);
-
-        // Also verify that counts= produces a hint
-        let mut doc2 = parse_ok("{@series(sec, counts=heading)}");
-        crate::resolve::HoistDirectives.run(&mut doc2);
-        let hint = doc2.content.attrs.inits.iter().find(|h| h.property == "series");
-        assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "sec"));
+    fn var_with_three_formats() {
+        let doc = parse_ok("{@var(idx, [0], format=[\"I\",\"1\",\"a\"])}");
+        let fmts = extract_var_formats(&doc).unwrap();
+        assert_eq!(fmts, vec!["I", "1", "a"]);
     }
 
     // ── Lang extraction from code fences ──

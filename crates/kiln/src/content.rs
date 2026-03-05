@@ -38,6 +38,8 @@ pub struct SectionConfig {
 pub struct ContentNode {
     pub path: String,
     pub slug: String,
+    /// Raw filename/dirname before slug transformation, used for sort ordering.
+    pub sort_key: String,
     pub kind: ContentKind,
     pub children: Vec<ContentNode>,
     pub position: usize,
@@ -94,6 +96,7 @@ pub fn discover_content(
     let root = ContentNode {
         path: String::new(),
         slug: String::new(),
+        sort_key: String::new(),
         kind: ContentKind::Virtual {
             slug: String::new(),
         },
@@ -175,8 +178,8 @@ fn discover_dir(
         )?);
     }
 
-    // Sort by original filename for stable ordering
-    nodes.sort_by(|a, b| a.slug.cmp(&b.slug));
+    // Sort by raw filename for stable ordering (preserves numeric prefixes)
+    nodes.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
 
     // Assign position indices
     for (i, node) in nodes.iter_mut().enumerate() {
@@ -239,6 +242,7 @@ fn discover_dir_entry(
         Ok(Some(ContentNode {
             path,
             slug,
+            sort_key: dir_name,
             kind,
             children,
             position: 0,
@@ -257,6 +261,7 @@ fn discover_dir_entry(
         Ok(Some(ContentNode {
             path,
             slug,
+            sort_key: dir_name.clone(),
             kind: ContentKind::Virtual { slug: dir_name },
             children,
             position: 0,
@@ -303,6 +308,7 @@ fn discover_file_entry(
     Ok(Some(ContentNode {
         path,
         slug,
+        sort_key: file_stem,
         kind,
         children: Vec::new(),
         position: 0,

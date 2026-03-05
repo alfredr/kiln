@@ -1,6 +1,5 @@
 use crate::ast::{
-    Action, Attrs, Declaration, FormatToken, Init, Node, NodeKind, OnDirective, SeriesConfig,
-    Value, VarDecl,
+    Action, Attrs, Declaration, Event, Init, Node, NodeKind, OnDirective, Value, VarDecl,
 };
 
 use super::inline::find_matching_delim;
@@ -157,7 +156,7 @@ pub(super) fn parse_directive_to_node(content: &str) -> Option<Node> {
     let mut node = Node::new(NodeKind::Custom {
         content_type: "directive".to_string(),
     });
-    // content looks like: @series(...) or @init(...)
+    // content looks like: @var(...) or @init(...)
     let content = content.trim();
     if !content.starts_with('@') {
         return None;
@@ -251,39 +250,171 @@ fn scan_id_or_class(sigil: char, chars: &[char], pos: usize, attrs: &mut Attrs) 
 
 /// Parse a `.kiln` prelude file into declarations and inits.
 ///
-/// Each non-empty, non-comment line is a bare directive: `@series(fig, counts=figure)`.
-/// Lines starting with `#` are comments. The leading `@` is optional.
+/// Supports both inline syntax (`@var(fig, 0)`) and block syntax:
+/// ```text
+/// @def(name) {
+///   @var(x, 0);
+///   @on(enter, section) { @pop(x); }
+/// }
+/// @use(name);
+/// ```
+/// Lines starting with `#` are comments.
 pub fn parse_prelude(text: &str) -> (Vec<Declaration>, Vec<Init>) {
     let mut attrs = Attrs::default();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+    // Strip comments, join into single string for block parsing
+    let stripped: String = text
+        .lines()
+        .map(|l| {
+            let trimmed = l.trim();
+            if trimmed.starts_with('#') { "" } else { trimmed }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    parse_prelude_statements(&stripped, &mut attrs);
+    (attrs.declarations, attrs.inits)
+}
+
+/// Parse a sequence of statements from a prelude string.
+/// Statements are `@cmd(args);` or `@cmd(args) { body }`.
+fn parse_prelude_statements(input: &str, attrs: &mut Attrs) {
+    let chars: Vec<char> = input.chars().collect();
+    let mut pos = 0;
+    while pos < chars.len() {
+        pos = parse_one_prelude_statement(&chars, pos, attrs);
+    }
+}
+
+/// Parse a single `@cmd(args)` or `@cmd(args) { body }` statement,
+/// returning the updated position.
+fn parse_one_prelude_statement(chars: &[char], mut pos: usize, attrs: &mut Attrs) -> usize {
+    // Skip whitespace
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    if pos >= chars.len() {
+        return pos;
+    }
+    // Expect @
+    if chars[pos] != '@' {
+        return pos + 1;
+    }
+    pos += 1; // skip @
+    // Read command name
+    let cmd_start = pos;
+    while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
+        pos += 1;
+    }
+    let cmd: String = chars[cmd_start..pos].iter().collect();
+    // Skip whitespace
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+    if pos >= chars.len() || chars[pos] != '(' {
+        return pos;
+    }
+    // Find matching close paren
+    let Some(close_paren) = find_matching_delim(chars, pos, '(', ')') else {
+        return chars.len();
+    };
+    let args: String = chars[pos + 1..close_paren].iter().collect();
+    pos = close_paren + 1;
+
+    // Skip whitespace
+    while pos < chars.len() && chars[pos].is_whitespace() {
+        pos += 1;
+    }
+
+    // Check for block body { ... }
+    if pos < chars.len() && chars[pos] == '{' {
+        let Some(close_brace) = find_matching_delim(chars, pos, '{', '}') else {
+            return chars.len();
+        };
+        let body: String = chars[pos + 1..close_brace].iter().collect();
+        pos = close_brace + 1;
+        // Skip optional trailing semicolon
+        while pos < chars.len() && (chars[pos].is_whitespace() || chars[pos] == ';') {
+            pos += 1;
         }
-        let line = line.strip_prefix('@').unwrap_or(line);
-        if let Some(paren) = line.find('(') {
-            let cmd = &line[..paren];
-            // Find matching closing paren (last ')' in line)
-            if let Some(close) = line.rfind(')') {
-                let args = &line[paren + 1..close];
-                apply_directive(&mut attrs, cmd, args);
+        apply_block_directive(attrs, &cmd, &args, &body);
+    } else {
+        // Inline statement — skip optional trailing semicolon
+        if pos < chars.len() && chars[pos] == ';' {
+            pos += 1;
+        }
+        apply_directive(attrs, &cmd, &args);
+    }
+    pos
+}
+
+/// Handle a block directive: `@cmd(args) { body }`.
+fn apply_block_directive(attrs: &mut Attrs, cmd: &str, args: &str, body: &str) {
+    match cmd {
+        "def" => {
+            let name = args.trim().to_string();
+            let mut inner = Attrs::default();
+            parse_prelude_statements(body, &mut inner);
+            attrs.declarations.push(Declaration::Def {
+                name,
+                body: inner.declarations,
+                inits: inner.inits,
+            });
+        }
+        "on" => {
+            // Parse event + selector from args, actions from body
+            if let Some(on) = parse_on_block_directive(args, body) {
+                attrs.declarations.push(Declaration::OnDirective(on));
             }
         }
+        _ => {}
     }
-    (attrs.declarations, attrs.inits)
+}
+
+/// Parse `@on(enter, selector) { @action1(...); @action2(...); }`.
+fn parse_on_block_directive(args: &str, body: &str) -> Option<OnDirective> {
+    let parts = split_top_level_commas(args);
+    if parts.is_empty() {
+        return None;
+    }
+
+    // Check for explicit event keyword
+    let (event, selector_parts) = match parts[0].trim() {
+        "enter" => (Event::Enter, &parts[1..]),
+        "exit" => (Event::Exit, &parts[1..]),
+        _ => (Event::Enter, &parts[..]),
+    };
+
+    let selector_str = selector_parts
+        .iter()
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join(",");
+    let selector = crate::selector::parse_selector(&selector_str)?;
+
+    // Parse actions from body — semicolon-separated @action(...) calls
+    let actions = parse_action_body(body);
+    if actions.is_empty() {
+        return None;
+    }
+
+    Some(OnDirective { event, selector, actions })
+}
+
+/// Parse a semicolon-separated block of `@action(...)` calls.
+fn parse_action_body(body: &str) -> Vec<Action> {
+    body.split(';')
+        .filter_map(|stmt| {
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                None
+            } else {
+                parse_action_call(stmt)
+            }
+        })
+        .collect()
 }
 
 fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
     match cmd {
-        "series" => {
-            if let Some((decl, inits, on_directives)) = parse_series_directive_full(args) {
-                attrs.declarations.push(decl);
-                attrs.inits.extend(inits);
-                for on in on_directives {
-                    attrs.declarations.push(Declaration::OnDirective(on));
-                }
-            }
-        }
         "init" | "hint" => {
             attrs.inits.extend(parse_init_directive(args));
         }
@@ -292,119 +423,23 @@ fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
                 attrs.declarations.push(Declaration::VarDecl(var_decl));
             }
         }
-        "on" => {
-            if let Some(on) = parse_on_directive(args) {
+        "on" | "content" => {
+            let parsed = if cmd == "on" {
+                parse_on_directive(args)
+            } else {
+                parse_content_directive(args)
+            };
+            if let Some(on) = parsed {
                 attrs.declarations.push(Declaration::OnDirective(on));
             }
         }
-        "content" => {
-            if let Some(on) = parse_content_directive(args) {
-                attrs.declarations.push(Declaration::OnDirective(on));
+        "use" => {
+            let name = args.trim().to_string();
+            if !name.is_empty() {
+                attrs.declarations.push(Declaration::Use { name });
             }
         }
         _ => {}
-    }
-}
-
-/// Parse `@series(fig, counts=figure, parent=sec, formats=["I","1"], cycle=true)`.
-///
-/// The `counts=SELECTOR` sugar generates an `Init` on the enclosing node that
-/// sets `series=ID` on matching descendants, plus `OnDirective`s for the triggers.
-/// Returns `(Declaration, Vec<Init>, Vec<OnDirective>)`.
-fn parse_series_directive_full(
-    args: &str,
-) -> Option<(Declaration, Vec<Init>, Vec<OnDirective>)> {
-    let parts = split_directive_args(args);
-    if parts.is_empty() {
-        return None;
-    }
-    let id = parts[0].0.clone();
-    let mut parent: Option<String> = None;
-    let mut formats: Vec<String> = vec!["1".to_string()];
-    let mut cycle = false;
-    let mut counts_inits: Vec<Init> = Vec::new();
-
-    for (key, val) in &parts[1..] {
-        match key.as_str() {
-            "parent" => parent = Some(val.clone()),
-            "cycle" => cycle = val == "true",
-            "formats" => {
-                formats = parse_format_list(val);
-            }
-            "counts" => {
-                // `counts=SELECTOR` expands to an init: @init(SELECTOR, series="ID")
-                counts_inits.extend(
-                    crate::selector::parse_selector(val).map(|selector| Init {
-                        selector,
-                        property: "series".to_string(),
-                        value: Value::Text(id.clone()),
-                    }),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // Build OnDirective: @on([series="ID"], @inc(ID), @store(number, ID))
-    let series_selector = series_attr_selector(&id);
-    let format_tokens: Vec<FormatToken> = formats.iter().map(|f| FormatToken::parse(f)).collect();
-    let on_actions = vec![
-        Action::Increment { var: id.clone() },
-        Action::StoreFormatted {
-            var: id.clone(),
-            property: "number".to_string(),
-            formats: format_tokens,
-            cycle,
-        },
-    ];
-
-    let mut on_directives = vec![OnDirective {
-        selector: series_selector.clone(),
-        actions: on_actions,
-    }];
-
-    // If parent is set, add @on([series="PARENT"], @reset(ID))
-    if let Some(ref parent_id) = parent {
-        let parent_selector = series_attr_selector(parent_id);
-        on_directives.push(OnDirective {
-            selector: parent_selector,
-            actions: vec![Action::Reset {
-                var: id.clone(),
-                to: initial_value_for_formats(&formats),
-            }],
-        });
-    }
-
-    let decl = Declaration::Series {
-        id,
-        config: SeriesConfig {
-            parent,
-            formats,
-            cycle,
-        },
-    };
-    Some((decl, counts_inits, on_directives))
-}
-
-/// Build a selector matching `[series="ID"]`.
-fn series_attr_selector(id: &str) -> crate::ast::Selector {
-    use crate::ast::*;
-    Selector::Expr(SelectorExpr::Simple(CompoundSelector {
-        attr_expr: Some(AttrExpr::Pred(AttrPred {
-            name: "series".to_string(),
-            op: AttrOp::Eq(id.to_string()),
-        })),
-        ..Default::default()
-    }))
-}
-
-/// Determine the initial value for a series from its format list.
-/// Multiple formats → hierarchical (List), single format → flat (Number).
-fn initial_value_for_formats(formats: &[String]) -> Value {
-    if formats.len() > 1 {
-        Value::List(vec![])
-    } else {
-        Value::Number(0.0)
     }
 }
 
@@ -444,37 +479,55 @@ fn parse_var_directive(args: &str) -> Option<VarDecl> {
     })
 }
 
-/// Parse an initial value string: `0` → Number, `[]` → List, `true/false` → Bool, etc.
+/// Parse an initial value string: `0` → Number, `[]` → List, `[0]` → List([0]), etc.
 fn parse_initial_value(s: &str) -> Value {
     let s = s.trim();
     match s {
-        "[]" => Value::List(vec![]),
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
-        _ => {
-            if let Ok(n) = s.parse::<f64>() {
-                Value::Number(n)
+        _ if s.starts_with('[') && s.ends_with(']') => {
+            let inner = s[1..s.len() - 1].trim();
+            Value::List(if inner.is_empty() {
+                vec![]
             } else {
-                Value::Text(s.trim_matches('"').to_string())
-            }
+                inner.split(',').map(parse_scalar_value).collect()
+            })
         }
+        _ => parse_scalar_value(s),
     }
 }
 
-/// Parse `@on(selector, @action1(...), @action2(...), ...)`.
+fn parse_scalar_value(s: &str) -> Value {
+    let s = s.trim();
+    if let Ok(n) = s.parse::<f64>() {
+        Value::Number(n)
+    } else {
+        Value::Text(s.trim_matches('"').to_string())
+    }
+}
+
+/// Parse `@on(enter, selector, @action1(...), ...)` or `@on(selector, @action1(...), ...)`.
 ///
-/// The first argument(s) before the first `@`-prefixed token form the selector.
-/// All `@`-prefixed tokens are action calls.
+/// If the first token is `enter` or `exit`, it sets the event phase; otherwise
+/// defaults to `Enter`. Remaining non-`@` tokens form the selector; `@`-prefixed
+/// tokens are action calls.
 fn parse_on_directive(args: &str) -> Option<OnDirective> {
     let parts = split_top_level_commas(args);
     if parts.is_empty() {
         return None;
     }
 
+    // Check for explicit event keyword as first token
+    let (event, rest) = match parts[0].trim() {
+        "enter" => (Event::Enter, &parts[1..]),
+        "exit" => (Event::Exit, &parts[1..]),
+        _ => (Event::Enter, &parts[..]),
+    };
+
     // Find the boundary: first part starting with @
-    let action_start = parts.iter().position(|p| p.trim().starts_with('@'));
+    let action_start = rest.iter().position(|p| p.trim().starts_with('@'));
     let (selector_parts, action_parts) = match action_start {
-        Some(idx) => (&parts[..idx], &parts[idx..]),
+        Some(idx) => (&rest[..idx], &rest[idx..]),
         None => return None, // no actions
     };
 
@@ -490,7 +543,7 @@ fn parse_on_directive(args: &str) -> Option<OnDirective> {
         return None;
     }
 
-    Some(OnDirective { selector, actions })
+    Some(OnDirective { event, selector, actions })
 }
 
 /// Parse a single `@action(args)` call.
@@ -511,6 +564,27 @@ fn parse_action_call(s: &str) -> Option<Action> {
         "inc" => Some(Action::Increment {
             var: args.trim().to_string(),
         }),
+        "dec" => Some(Action::Decrement {
+            var: args.trim().to_string(),
+        }),
+        "pop" => {
+            let mut parts = split_directive_args(args).into_iter();
+            let list = parts.next()?.0;
+            let into = parts.next().map(|(k, _)| k);
+            Some(Action::Pop { list, into })
+        }
+        "push" => {
+            let mut parts = parse_args(args, 2)?.into_iter();
+            let list = parts.next()?.0;
+            let value_str = parts.next()?.0;
+            // If it parses as a number, treat as literal; otherwise it's a var reference
+            let value = if let Ok(n) = value_str.trim().parse::<f64>() {
+                crate::ast::PushValue::Literal(Value::Number(n))
+            } else {
+                crate::ast::PushValue::Var(value_str.trim().to_string())
+            };
+            Some(Action::Push { list, value })
+        }
         "reset" => {
             let parts = split_directive_args(args);
             let var = parts.first()?.0.clone();
@@ -523,10 +597,7 @@ fn parse_action_call(s: &str) -> Option<Action> {
             Some(Action::Reset { var, to })
         }
         "store" => {
-            let parts = split_directive_args(args);
-            if parts.len() < 2 {
-                return None;
-            }
+            let parts = parse_args(args, 2)?;
             let property = parts[0].0.clone();
             let var = parts[1].0.clone();
             // Formats come from the VarDecl; at this level we don't know them
@@ -538,26 +609,19 @@ fn parse_action_call(s: &str) -> Option<Action> {
             })
         }
         "set" => {
-            let parts = split_directive_args(args);
-            if parts.len() < 2 {
-                return None;
-            }
+            let parts = parse_args(args, 2)?;
             let property = parts[0].0.clone();
             let value = parse_init_value(&parts[1].1);
             Some(Action::SetProperty { property, value })
         }
-        "prepend" => {
-            let template = parse_text_arg(args);
-            Some(Action::Prepend { template })
-        }
-        "append" => {
-            let template = parse_text_arg(args);
-            Some(Action::Append { template })
-        }
-        "content" => {
+        "prepend" | "content" | "append" => {
             // @content("template") is sugar for @prepend(@text("template"))
             let template = parse_text_arg(args);
-            Some(Action::Prepend { template })
+            Some(if cmd == "append" {
+                Action::Append { template }
+            } else {
+                Action::Prepend { template }
+            })
         }
         _ => None,
     }
@@ -589,6 +653,7 @@ fn parse_content_directive(args: &str) -> Option<OnDirective> {
     let template = parts[1..].join(",").trim().trim_matches('"').to_string();
 
     Some(OnDirective {
+        event: Event::Enter,
         selector,
         actions: vec![Action::Prepend { template }],
     })
@@ -757,8 +822,8 @@ fn split_kv(token: &str) -> (String, String) {
 }
 
 fn split_directive_args(args: &str) -> Vec<(String, String)> {
-    let chars: Vec<char> = args.chars().collect();
     let mut pos = 0;
+    let chars: Vec<char> = args.chars().collect();
     std::iter::from_fn(|| {
         while pos < chars.len() && (chars[pos].is_whitespace() || chars[pos] == ',') {
             pos += 1;
@@ -776,6 +841,11 @@ fn split_directive_args(args: &str) -> Vec<(String, String)> {
         Some(split_kv(token))
     })
     .collect()
+}
+
+fn parse_args(args: &str, min: usize) -> Option<Vec<(String, String)>> {
+    let parts = split_directive_args(args);
+    (parts.len() >= min).then_some(parts)
 }
 
 fn find_top_level_eq(s: &str) -> Option<usize> {
@@ -1052,14 +1122,6 @@ mod tests {
     // ── parse_directive_to_node ──
 
     #[test]
-    fn directive_to_node_series() {
-        let node = parse_directive_to_node("@series(fig, counts=figure)");
-        assert!(node.is_some());
-        let n = node.unwrap();
-        assert!(!n.attrs.declarations.is_empty());
-    }
-
-    #[test]
     fn directive_to_node_hint() {
         let node = parse_directive_to_node("@hint(figure, series=figs)");
         assert!(node.is_some());
@@ -1075,13 +1137,13 @@ mod tests {
 
     #[test]
     fn directive_to_node_no_parens() {
-        let node = parse_directive_to_node("@series");
+        let node = parse_directive_to_node("@var");
         assert!(node.is_none());
     }
 
     #[test]
     fn directive_to_node_unclosed_paren() {
-        let node = parse_directive_to_node("@series(fig, counts=figure");
+        let node = parse_directive_to_node("@var(fig, 0");
         assert!(node.is_none());
     }
 
@@ -1387,54 +1449,6 @@ mod tests {
         assert_eq!(v, "val");
     }
 
-    // ── parse_series_directive_full ──
-
-    #[test]
-    fn series_full_basic() {
-        let result = parse_series_directive_full("fig");
-        assert!(result.is_some());
-        let (decl, inits, _on_directives) = result.unwrap();
-        if let Declaration::Series { id, config } = decl {
-            assert_eq!(id, "fig");
-            assert_eq!(config.formats, vec!["1"]);
-            assert!(config.parent.is_none());
-            assert!(!config.cycle);
-        } else {
-            panic!("expected Series");
-        }
-        assert!(inits.is_empty());
-    }
-
-    #[test]
-    fn series_full_with_counts() {
-        let result = parse_series_directive_full("fig, counts=figure");
-        assert!(result.is_some());
-        let (_, inits, _) = result.unwrap();
-        assert_eq!(inits.len(), 1);
-        assert_eq!(inits[0].property, "series");
-    }
-
-    #[test]
-    fn series_full_with_all_params() {
-        let result = parse_series_directive_full("fig, parent=sec, formats=[\"I\",\"1\"], cycle=true, counts=figure");
-        assert!(result.is_some());
-        let (decl, inits, _) = result.unwrap();
-        if let Declaration::Series { config, .. } = decl {
-            assert_eq!(config.parent.as_deref(), Some("sec"));
-            assert_eq!(config.formats, vec!["I", "1"]);
-            assert!(config.cycle);
-        } else {
-            panic!("expected Series");
-        }
-        assert_eq!(inits.len(), 1);
-    }
-
-    #[test]
-    fn series_full_empty() {
-        let result = parse_series_directive_full("");
-        assert!(result.is_none());
-    }
-
     // ── Unknown directive ──
 
     #[test]
@@ -1469,34 +1483,19 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn parse_series_with_counts_and_formats() {
-        let mut attrs = Attrs::default();
-        apply_directive(&mut attrs, "series", "tbl, counts=table, formats=[\"I\",\"a\"]");
-        assert!(!attrs.declarations.is_empty());
-        assert!(!attrs.inits.is_empty());
-        // Check that the series hint was generated for table selector
-        let has_series_hint = attrs.inits.iter().any(|h| h.property == "series");
-        assert!(has_series_hint, "should have series hint from counts=");
-    }
-
-    // ── is_property_token edge cases ──
-
     // ── parse_prelude tests ──
 
     #[test]
     fn parse_prelude_basic() {
         let text = r#"
-@series(fig, counts=figure)
+@var(fig, 0, format="1")
 @init(figure, label="Figure {n}")
 "#;
         let (decls, inits) = parse_prelude(text);
         assert!(!decls.is_empty(), "should produce declarations");
         assert!(!inits.is_empty(), "should produce inits");
-        // series produces a Declaration::Series + OnDirective(s)
-        let has_series = decls.iter().any(|d| matches!(d, Declaration::Series { .. }));
-        assert!(has_series, "should have a series declaration");
-        // init produces an Init with label property
+        let has_var = decls.iter().any(|d| matches!(d, Declaration::VarDecl(_)));
+        assert!(has_var, "should have a var declaration");
         let has_label = inits.iter().any(|i| i.property == "label");
         assert!(has_label, "should have label init");
     }
@@ -1511,9 +1510,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_prelude_without_at_prefix() {
-        // Lines without @ prefix should also work
-        let text = "series(fig, counts=figure)\ninit(figure, label=\"Fig {n}\")\n";
+    fn parse_prelude_with_at_prefix() {
+        let text = "@var(fig, 0, format=\"1\");\n@init(figure, label=\"Fig {n}\");\n";
         let (decls, inits) = parse_prelude(text);
         assert!(!decls.is_empty());
         assert!(!inits.is_empty());

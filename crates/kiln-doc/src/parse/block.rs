@@ -24,7 +24,7 @@ pub(super) enum RawBlock {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
     },
-    /// A standalone directive line like `{@series(...)}`
+    /// A standalone directive line like `{@var(...)}`
     Directive(String),
 }
 
@@ -950,7 +950,7 @@ mod tests {
             "|---|---|",
             "| 1 | 2 |",
             "",
-            "{@series(fig)}",   // directive
+            "{@var(fig, 0)}",   // directive
             "",
             "paragraph text",   // paragraph
         ];

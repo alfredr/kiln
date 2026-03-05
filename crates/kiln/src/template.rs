@@ -237,8 +237,9 @@ mod tests {
             ContentKind::Virtual { slug } => (slug.clone(), slug.clone()),
         };
         ContentNode {
-            path,
+            path: path.clone(),
             slug,
+            sort_key: path,
             kind,
             children: Vec::new(),
             position: 0,
@@ -362,6 +363,7 @@ mod tests {
         let parent = ContentNode {
             path: "docs".to_string(),
             slug: "docs".to_string(),
+            sort_key: "docs".to_string(),
             kind: ContentKind::Page(test_item(
                 "docs",
                 Metadata {

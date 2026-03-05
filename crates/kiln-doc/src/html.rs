@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn cross_ref_with_resolved_text() {
         reset_id_counter();
-        let mut doc = parse("{@series(fig, counts=figure)}\n{@hint(figure, label=\"Figure {n}\")}\n\n![Pic](a.png){#fig:pic}\n\nSee @fig:pic.").unwrap();
+        let mut doc = parse("{@var(fig, 0, format=\"1\")}\n{@init(figure, series=\"fig\")}\n{@on([series=\"fig\"], @inc(fig), @store(number, fig))}\n{@hint(figure, label=\"Figure {n}\")}\n\n![Pic](a.png){#fig:pic}\n\nSee @fig:pic.").unwrap();
         crate::resolve::resolve_document(&mut doc);
         let html = render_html(&doc);
         assert!(html.contains("Figure 1"), "resolved cross-ref should show label: {html}");
@@ -1362,7 +1362,12 @@ mod tests {
         use crate::resolve::resolve_document;
         reset_id_counter();
         let md = "\
-{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@var(index, [0], format=[\"I\",\"1\"])}
+{@var(val, 0)}
+{@init(heading, series=\"index\")}
+{@on(enter, section > section, @pop(index, val), @inc(val), @push(index, val), @push(index, 0))}
+{@on(exit, section > section, @pop(index))}
+{@on([series=\"index\"], @pop(index, val), @store(number, index), @push(index, val))}
 {@content(heading, \"{number}. \")}
 
 # Introduction
@@ -1381,7 +1386,9 @@ mod tests {
         use crate::resolve::resolve_document;
         reset_id_counter();
         let md = "\
-{@series(fig, counts=figure)}
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
 {@init(figure, label=\"Figure {n}\")}
 
 ![Arch](arch.png){#fig:arch}
