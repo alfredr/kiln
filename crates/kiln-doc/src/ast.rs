@@ -134,8 +134,8 @@ pub struct Attrs {
     pub frontmatter: Option<serde_yaml_ng::Value>,
     /// Resources declared in this scope (e.g. series).
     pub declarations: Vec<Declaration>,
-    /// Scoped hints that cascade to descendants.
-    pub hints: Vec<Hint>,
+    /// Scoped inits that cascade to descendants.
+    pub inits: Vec<Init>,
 }
 
 impl Attrs {
@@ -147,7 +147,7 @@ impl Attrs {
             properties: HashMap::new(),
             frontmatter: None,
             declarations: Vec::new(),
-            hints: Vec::new(),
+            inits: Vec::new(),
         }
     }
 }
@@ -158,19 +158,19 @@ impl Default for Attrs {
     }
 }
 
-// ── The Hint Cascade ──
+// ── The Init Cascade ──
 
-/// A scoped hint: "for nodes matching SELECTOR in my scope, set PROPERTY = VALUE."
+/// A scoped init: "for nodes matching SELECTOR in my scope, set PROPERTY = VALUE."
 ///
-/// Hints cascade to all descendants. When multiple hints match the same node
+/// Inits cascade to all descendants. When multiple inits match the same node
 /// and set the same property, closest ancestor wins (innermost scope).
 ///
 /// ```text
-/// {@hint(figure, series="figs")}
-/// {@hint(heading, font_family="Georgia")}
+/// {@init(figure, series="figs")}
+/// {@init(heading, font_family="Georgia")}
 /// ```
 #[derive(Debug, Clone)]
-pub struct Hint {
+pub struct Init {
     pub selector: Selector,
     pub property: String,
     pub value: Value,
@@ -274,7 +274,50 @@ pub enum AttrOp {
 /// A named resource declared in a scope.
 #[derive(Debug, Clone)]
 pub enum Declaration {
+    /// Sugar: declares a numbered series (expands to VarDecl + Init + OnDirective).
     Series { id: String, config: SeriesConfig },
+    /// A running-state variable initialization.
+    VarDecl(VarDecl),
+    /// A selector-triggered action rule.
+    OnDirective(OnDirective),
+}
+
+/// A variable initialization: name + initial value + optional format tokens.
+#[derive(Debug, Clone)]
+pub struct VarDecl {
+    pub name: String,
+    pub value: Value,
+    pub formats: Vec<String>,
+    pub cycle: bool,
+}
+
+/// A selector-triggered action rule.
+#[derive(Debug, Clone)]
+pub struct OnDirective {
+    pub selector: Selector,
+    pub actions: Vec<Action>,
+}
+
+/// An action to execute when a trigger fires.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Number: add 1. List: bump at heading depth, truncate deeper.
+    Increment { var: String },
+    /// Reset a variable to its initial value.
+    Reset { var: String, to: Value },
+    /// Format a running-state variable and store as a node property.
+    StoreFormatted {
+        var: String,
+        property: String,
+        formats: Vec<FormatToken>,
+        cycle: bool,
+    },
+    /// Set a node property to a literal value.
+    SetProperty { property: String, value: Value },
+    /// Insert a text node before existing children.
+    Prepend { template: String },
+    /// Insert a text node after existing children.
+    Append { template: String },
 }
 
 /// Configuration for a series (counter/sequence manager).

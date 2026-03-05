@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Declaration, Document, FormatToken, Hint, Node, NodeKind, RawBlockCompiler, Selector,
-    SeriesConfig, Value,
+    Action, Declaration, Document, FormatToken, Init, Node, NodeKind, OnDirective,
+    RawBlockCompiler, Selector, Value,
 };
 use crate::selector::{NodeSnapshot, matches_selector};
 use crate::visit::Pass;
@@ -22,26 +22,26 @@ pub struct ResolveContext {
 
 /// Resolve cross-references, citations, and series in a set of documents.
 ///
-/// Stage A: minimal — just passes through. No series resolution, no hint
+/// Stage A: minimal — just passes through. No series resolution, no init
 /// cascade evaluation. The AST is designed to support it; we just don't
 /// run it yet.
 pub fn resolve(_ctx: &mut ResolveContext) {
     // Stage A: no-op. Full resolution comes later.
 }
 
-/// Resolve hints within a single document (convenience function).
+/// Resolve inits within a single document (convenience function).
 ///
-/// Runs `HoistDirectives` → `CascadeHints` → `AssignNumbers` → `ResolveCrossRefs`.
+/// Runs `HoistDirectives` → `CascadeInits` → `ExecuteProgram` → `ResolveCrossRefs`.
 pub fn resolve_document(doc: &mut Document) {
     HoistDirectives.run(doc);
-    CascadeHints.run(doc);
-    AssignNumbers.run(doc);
+    CascadeInits.run(doc);
+    ExecuteProgram.run(doc);
     ResolveCrossRefs.run(doc);
 }
 
 // ── HoistDirectives pass ──
 
-/// Move hints and declarations from `Custom { "directive" }` child nodes
+/// Move inits and declarations from `Custom { "directive" }` child nodes
 /// to their parent scope, then remove those directive nodes.
 pub struct HoistDirectives;
 
@@ -57,17 +57,17 @@ fn hoist(node: &mut Node) {
         hoist(child);
     }
 
-    let mut hoisted_hints = Vec::new();
+    let mut hoisted_inits = Vec::new();
     let mut hoisted_decls = Vec::new();
 
     for child in &node.children {
         if matches!(&child.kind, NodeKind::Custom { content_type } if content_type == "directive") {
-            hoisted_hints.extend(child.attrs.hints.iter().cloned());
+            hoisted_inits.extend(child.attrs.inits.iter().cloned());
             hoisted_decls.extend(child.attrs.declarations.iter().cloned());
         }
     }
 
-    node.attrs.hints.extend(hoisted_hints);
+    node.attrs.inits.extend(hoisted_inits);
     node.attrs.declarations.extend(hoisted_decls);
 
     node.children.retain(|child| {
@@ -75,71 +75,95 @@ fn hoist(node: &mut Node) {
     });
 }
 
-// ── CascadeHints pass ──
+// ── CascadeInits pass ──
 
-/// Walk the tree depth-first, matching ancestor hints against each node
+/// Walk the tree depth-first, matching ancestor inits against each node
 /// and merging into `attrs.properties`. Nearest ancestor wins;
 /// authored values are never overwritten.
-pub struct CascadeHints;
+pub struct CascadeInits;
 
-impl Pass for CascadeHints {
+impl Pass for CascadeInits {
     fn run(&mut self, doc: &mut Document) {
         cascade(&mut doc.content, &[], &[]);
     }
 }
 
-fn cascade(node: &mut Node, ancestor_hints: &[Vec<Hint>], ancestors: &[NodeSnapshot]) {
-    // Apply own This hints to self.
-    for hint in &node.attrs.hints {
-        if matches!(hint.selector, Selector::This) {
+fn cascade(node: &mut Node, ancestor_inits: &[Vec<Init>], ancestors: &[NodeSnapshot]) {
+    // Apply own This inits to self.
+    for init in &node.attrs.inits {
+        if matches!(init.selector, Selector::This) {
             node.attrs
                 .properties
-                .entry(hint.property.clone())
-                .or_insert_with(|| hint.value.clone());
+                .entry(init.property.clone())
+                .or_insert_with(|| init.value.clone());
         }
     }
 
-    // Match ancestor hints (nearest first via rev → entry-or-insert = nearest wins).
-    for hint in ancestor_hints.iter().rev().flatten() {
-        if matches_selector(&hint.selector, node, ancestors) {
+    // Match ancestor inits (nearest first via rev → entry-or-insert = nearest wins).
+    for init in ancestor_inits.iter().rev().flatten() {
+        if matches_selector(&init.selector, node, ancestors) {
             node.attrs
                 .properties
-                .entry(hint.property.clone())
-                .or_insert_with(|| hint.value.clone());
+                .entry(init.property.clone())
+                .or_insert_with(|| init.value.clone());
         }
     }
 
     // Build ancestor stacks for children (clone to avoid borrow conflict).
-    let own_hints = node.attrs.hints.clone();
-    let mut child_ancestor_hints: Vec<Vec<Hint>> = ancestor_hints.to_vec();
-    child_ancestor_hints.push(own_hints);
+    let own_inits = node.attrs.inits.clone();
+    let mut child_ancestor_inits: Vec<Vec<Init>> = ancestor_inits.to_vec();
+    child_ancestor_inits.push(own_inits);
 
     let snap = NodeSnapshot::from_node(node);
     let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
     child_ancestors.push(snap);
 
     for child in &mut node.children {
-        cascade(child, &child_ancestor_hints, &child_ancestors);
+        cascade(child, &child_ancestor_inits, &child_ancestors);
     }
 }
 
-// ── AssignNumbers pass ──
+// ── ExecuteProgram pass (generic reactive walk engine) ──
 
-/// Walk the tree in document order, matching series declarations against
-/// nodes via the cascaded `series` property, assigning numbers and building
-/// a label map for cross-references.
-pub struct AssignNumbers;
+/// Running state carried through the walk — a map of Values.
+type WalkState = HashMap<String, Value>;
 
-impl Pass for AssignNumbers {
+/// Metadata about a declared variable (format info).
+struct VarMeta {
+    initial: Value,
+    formats: Vec<FormatToken>,
+    cycle: bool,
+}
+
+/// Entry in the label map built during the walk.
+struct LabelEntry {
+    number: String,
+    label_template: String,
+}
+
+/// Walk the tree in document order, executing variable inits and firing
+/// selector-triggered actions. Replaces the old `AssignNumbers` pass.
+pub struct ExecuteProgram;
+
+impl Pass for ExecuteProgram {
     fn run(&mut self, doc: &mut Document) {
-        // Check if any series declarations exist.
-        if !has_series_declarations(&doc.content) {
+        if !has_program_declarations(&doc.content) {
             return;
         }
-        let mut locals = Locals::default();
-        let mut label_map = HashMap::new();
-        assign_walk(&mut doc.content, &mut locals, &mut label_map);
-        // Stash the label map on the root for ResolveCrossRefs.
+        let mut state = WalkState::new();
+        let mut var_meta: HashMap<String, VarMeta> = HashMap::new();
+        let mut triggers: Vec<OnDirective> = Vec::new();
+        let mut label_map: HashMap<String, LabelEntry> = HashMap::new();
+
+        program_walk(
+            &mut doc.content,
+            &mut state,
+            &mut var_meta,
+            &mut triggers,
+            &mut label_map,
+            &[],
+        );
+
         if !label_map.is_empty() {
             doc.content
                 .attrs
@@ -149,194 +173,268 @@ impl Pass for AssignNumbers {
     }
 }
 
-/// Locals for the counter engine — shared mutable state during the walk.
-#[derive(Default)]
-struct Locals {
-    /// Per-series state: series_id → SeriesState.
-    series: HashMap<String, SeriesState>,
-}
-
-#[derive(Clone)]
-struct SeriesState {
-    /// Hierarchical count array (one entry per depth level).
-    counts: Vec<i64>,
-    /// Flat counter for non-hierarchical series.
-    counter: i64,
-    /// The series config.
-    config: SeriesConfig,
-}
-
-/// Entry in the label map built during pass 1.
-struct LabelEntry {
-    /// The computed display number (e.g. "I.2.1").
-    number: String,
-    /// The label template (e.g. "Figure {n}").
-    label_template: String,
-}
-
-fn has_series_declarations(node: &Node) -> bool {
-    if node.attrs.declarations.iter().any(|d| matches!(d, Declaration::Series { .. })) {
+/// Check if any program declarations exist in the tree.
+fn has_program_declarations(node: &Node) -> bool {
+    if node.attrs.declarations.iter().any(|d| {
+        matches!(
+            d,
+            Declaration::Series { .. }
+                | Declaration::VarDecl(_)
+                | Declaration::OnDirective(_)
+        )
+    }) {
         return true;
     }
-    node.children.iter().any(has_series_declarations)
+    node.children.iter().any(has_program_declarations)
 }
 
-fn assign_walk(
+fn program_walk(
     node: &mut Node,
-    locals: &mut Locals,
+    state: &mut WalkState,
+    var_meta: &mut HashMap<String, VarMeta>,
+    triggers: &mut Vec<OnDirective>,
     label_map: &mut HashMap<String, LabelEntry>,
+    ancestors: &[NodeSnapshot],
 ) {
-    // Initialize series state from declarations on this node.
-    for decl in &node.attrs.declarations {
-        let Declaration::Series { id, config } = decl;
-        locals.series.entry(id.clone()).or_insert_with(|| SeriesState {
-            counts: Vec::new(),
-            counter: 0,
-            config: config.clone(),
-        });
-    }
-
-    // Check for series membership via the cascaded `series` property.
-    if let Some(Value::Text(series_id)) = node.attrs.properties.get("series").cloned() {
-        let is_heading = matches!(&node.kind, NodeKind::Heading { .. });
-        let is_hierarchical = is_heading
-            && locals
-                .series
-                .get(&series_id)
-                .is_some_and(|s| s.config.formats.len() > 1);
-
-        if is_hierarchical {
-            let level = match &node.kind {
-                NodeKind::Heading { level } => *level as usize,
-                _ => unreachable!(),
-            };
-            bump_depth(locals, &series_id, level);
-        } else {
-            incr_counter(locals, &series_id);
+    // 1. Initialize variables from declarations on this node.
+    let decls = node.attrs.declarations.clone();
+    for decl in &decls {
+        match decl {
+            Declaration::VarDecl(vd) => {
+                state.entry(vd.name.clone()).or_insert_with(|| vd.value.clone());
+                var_meta.entry(vd.name.clone()).or_insert_with(|| VarMeta {
+                    initial: vd.value.clone(),
+                    formats: vd.formats.iter().map(|f| FormatToken::parse(f)).collect(),
+                    cycle: vd.cycle,
+                });
+            }
+            Declaration::Series { id, config } => {
+                // Series compat: initialize as Number(0) or List([]) based on format count
+                let initial = if config.formats.len() > 1 {
+                    Value::List(vec![])
+                } else {
+                    Value::Number(0.0)
+                };
+                state.entry(id.clone()).or_insert_with(|| initial.clone());
+                var_meta.entry(id.clone()).or_insert_with(|| VarMeta {
+                    initial,
+                    formats: config
+                        .formats
+                        .iter()
+                        .map(|f| FormatToken::parse(f))
+                        .collect(),
+                    cycle: config.cycle,
+                });
+            }
+            Declaration::OnDirective(on) => {
+                triggers.push(on.clone());
+            }
         }
-        store_number(node, locals, &series_id, label_map);
     }
 
+    // 2. Fire matching triggers in declaration order.
+    let snap = NodeSnapshot::from_node(node);
+    let trigger_snapshot = triggers.clone();
+    for trigger in &trigger_snapshot {
+        if matches_selector(&trigger.selector, node, ancestors) {
+            for action in &trigger.actions {
+                execute_action(action, node, state, var_meta, label_map);
+            }
+        }
+    }
+
+    // 3. Recurse — children see (and modify) the running state.
+    let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
+    child_ancestors.push(snap);
     for child in &mut node.children {
-        assign_walk(child, locals, label_map);
+        program_walk(child, state, var_meta, triggers, label_map, &child_ancestors);
     }
 }
 
-/// Compute the number for a series and store it on the node.
-fn store_number(
+/// Execute a single action on a node.
+fn execute_action(
+    action: &Action,
     node: &mut Node,
-    locals: &Locals,
-    series_id: &str,
+    state: &mut WalkState,
+    var_meta: &HashMap<String, VarMeta>,
     label_map: &mut HashMap<String, LabelEntry>,
 ) {
-    if let Some(state) = locals.series.get(series_id) {
-        let number = render_series_number(state);
-        node.attrs
-            .properties
-            .insert("number".to_string(), Value::Text(number.clone()));
+    match action {
+        Action::Increment { var } => {
+            if let Some(val) = state.get_mut(var) {
+                match val {
+                    Value::Number(n) => *n += 1.0,
+                    Value::List(counts) => {
+                        // Hierarchical: bump at heading depth, truncate deeper.
+                        let level = match &node.kind {
+                            NodeKind::Heading { level } => *level as usize,
+                            _ => 1,
+                        };
+                        while counts.len() < level {
+                            counts.push(Value::Number(0.0));
+                        }
+                        if let Some(Value::Number(n)) = counts.get_mut(level - 1) {
+                            *n += 1.0;
+                        }
+                        counts.truncate(level);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Action::Reset { var, to } => {
+            // Use the provided reset value, or fall back to var's initial value.
+            let reset_val = if matches!(to, Value::Number(n) if *n == 0.0) {
+                var_meta
+                    .get(var)
+                    .map(|m| m.initial.clone())
+                    .unwrap_or_else(|| to.clone())
+            } else {
+                to.clone()
+            };
+            state.insert(var.clone(), reset_val);
+        }
+        Action::StoreFormatted {
+            var,
+            property,
+            formats,
+            cycle,
+        } => {
+            if let Some(val) = state.get(var) {
+                // Use action-level formats if provided, otherwise fall back to var_meta
+                let (effective_formats, effective_cycle) = if !formats.is_empty() {
+                    (formats.as_slice(), *cycle)
+                } else if let Some(meta) = var_meta.get(var) {
+                    (meta.formats.as_slice(), meta.cycle)
+                } else {
+                    (&[] as &[FormatToken], false)
+                };
+                let number = format_value(val, effective_formats, effective_cycle);
+                node.attrs
+                    .properties
+                    .insert(property.clone(), Value::Text(number.clone()));
 
-        if !node.attrs.auto_id {
-            let label_template = node
-                .attrs
+                // Build label map entry for cross-refs.
+                if !node.attrs.auto_id {
+                    let label_template = node
+                        .attrs
+                        .properties
+                        .get("label")
+                        .and_then(|v| match v {
+                            Value::Text(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    label_map.insert(
+                        node.attrs.id.clone(),
+                        LabelEntry {
+                            number,
+                            label_template,
+                        },
+                    );
+                }
+            }
+        }
+        Action::SetProperty { property, value } => {
+            node.attrs
                 .properties
-                .get("label")
-                .and_then(|v| match v {
-                    Value::Text(s) => Some(s.clone()),
-                    _ => None,
+                .insert(property.clone(), value.clone());
+        }
+        Action::Prepend { template } => {
+            let text = interpolate_template(template, &node.attrs.properties);
+            node.children.insert(0, Node::text(text));
+        }
+        Action::Append { template } => {
+            let text = interpolate_template(template, &node.attrs.properties);
+            node.children.push(Node::text(text));
+        }
+    }
+}
+
+/// Format a Value using format tokens.
+fn format_value(val: &Value, formats: &[FormatToken], cycle: bool) -> String {
+    match val {
+        Value::Number(n) => {
+            let fmt = if formats.is_empty() {
+                FormatToken::parse("1")
+            } else {
+                formats[0].clone()
+            };
+            fmt.render(*n as u32)
+        }
+        Value::List(counts) => {
+            // Skip leading zeros — handles documents where top-level headings
+            // (e.g. h1) are absent from content (provided by template instead).
+            let start = counts
+                .iter()
+                .position(|v| !matches!(v, Value::Number(n) if *n == 0.0))
+                .unwrap_or(0);
+            counts[start..]
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let n = match v {
+                        Value::Number(n) => *n as u32,
+                        _ => 0,
+                    };
+                    let fmt = get_format_at(formats, start + i, cycle);
+                    fmt.render(n)
                 })
-                .unwrap_or_default();
-            label_map.insert(
-                node.attrs.id.clone(),
-                LabelEntry {
-                    number,
-                    label_template,
-                },
-            );
+                .collect::<Vec<_>>()
+                .join(".")
         }
+        _ => String::new(),
     }
-}
-
-/// Bump the depth of a hierarchical series at the given level.
-fn bump_depth(locals: &mut Locals, series_id: &str, level: usize) {
-    // Phase 1: update the series state.
-    let updated = if let Some(state) = locals.series.get_mut(series_id) {
-        while state.counts.len() < level {
-            state.counts.push(0);
-        }
-        state.counts[level - 1] += 1;
-        state.counts.truncate(level);
-        true
-    } else {
-        false
-    };
-
-    if !updated {
-        return;
-    }
-
-    // Phase 2: reset child series (separate borrow scope).
-    let child_ids: Vec<String> = locals
-        .series
-        .iter()
-        .filter(|(_, s)| s.config.parent.as_deref() == Some(series_id))
-        .map(|(id, _)| id.clone())
-        .collect();
-    for child_id in child_ids {
-        if let Some(child_state) = locals.series.get_mut(&child_id) {
-            child_state.counter = 0;
-        }
-    }
-}
-
-/// Increment a flat counter for a series.
-fn incr_counter(locals: &mut Locals, series_id: &str) {
-    if let Some(state) = locals.series.get_mut(series_id) {
-        state.counter += 1;
-    }
-}
-
-/// Render the number for a series based on its current state.
-fn render_series_number(state: &SeriesState) -> String {
-    if !state.counts.is_empty() && state.counter > 0 {
-        // Hierarchical with flat counter: "I.2.1" (parent hierarchy + own counter).
-        let parent_num = render_hierarchical(&state.counts, &state.config);
-        let own_fmt = get_format_token(&state.config, state.counts.len());
-        format!("{}.{}", parent_num, own_fmt.render(state.counter as u32))
-    } else if !state.counts.is_empty() {
-        // Pure hierarchical: "I.2.1"
-        render_hierarchical(&state.counts, &state.config)
-    } else {
-        // Flat counter only: "1", "2", etc.
-        let fmt = get_format_token(&state.config, 0);
-        fmt.render(state.counter as u32)
-    }
-}
-
-/// Render a hierarchical number from a counts array.
-fn render_hierarchical(counts: &[i64], config: &SeriesConfig) -> String {
-    counts
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| {
-            let token = get_format_token(config, i);
-            token.render(c as u32)
-        })
-        .collect::<Vec<_>>()
-        .join(".")
 }
 
 /// Get the format token for a given depth index.
-fn get_format_token(config: &SeriesConfig, depth: usize) -> FormatToken {
-    if config.formats.is_empty() {
+fn get_format_at(formats: &[FormatToken], depth: usize, cycle: bool) -> FormatToken {
+    if formats.is_empty() {
         return FormatToken::parse("1");
     }
-    let idx = if config.cycle {
-        depth % config.formats.len()
+    let idx = if cycle {
+        depth % formats.len()
     } else {
-        depth.min(config.formats.len() - 1)
+        depth.min(formats.len() - 1)
     };
-    FormatToken::parse(&config.formats[idx])
+    formats[idx].clone()
 }
+
+/// Interpolate `{key}` placeholders in a template from node properties.
+fn interpolate_template(template: &str, properties: &HashMap<String, Value>) -> String {
+    let mut result = String::new();
+    let mut chars = template.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' {
+            let mut key = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == '}' {
+                    chars.next();
+                    break;
+                }
+                key.push(c);
+                chars.next();
+            }
+            if let Some(val) = properties.get(&key) {
+                match val {
+                    Value::Text(s) => result.push_str(s),
+                    Value::Number(n) => result.push_str(&n.to_string()),
+                    Value::Bool(b) => result.push_str(&b.to_string()),
+                    _ => {}
+                }
+            }
+            // Missing key → empty string (by design)
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+// ── Legacy compat aliases ──
+
+/// Legacy alias for `ExecuteProgram`.
+pub type AssignNumbers = ExecuteProgram;
 
 /// Encode a label map as a `Value::Map` for stashing on the root node.
 fn encode_label_map(map: &HashMap<String, LabelEntry>) -> Value {
@@ -433,7 +531,7 @@ fn format_label_display(template: &str, number: &str) -> String {
 
 /// Compile raw blocks and preview code blocks, storing results in `attrs.properties`.
 ///
-/// Must run after `CascadeHints` (reads the `preview` property).
+/// Must run after `CascadeInits` (reads the `preview` property).
 /// For each `RawBlock`, compiles via the provided `RawBlockCompiler`.
 /// For each `CodeBlock` with `preview`, compiles using the preview format.
 /// Stores compiled HTML in `properties["compiled"]` and errors in
@@ -525,7 +623,7 @@ mod tests {
             |n| matches!(&n.kind, NodeKind::Custom { content_type } if content_type == "directive"),
         );
         assert!(!has_directive);
-        assert!(!doc.content.attrs.hints.is_empty());
+        assert!(!doc.content.attrs.inits.is_empty());
     }
 
     #[test]
@@ -627,7 +725,7 @@ mod tests {
         // Simulates what build.rs does: parse without directives, then inject hints.
         reset_id_counter();
         let mut doc = parse("## Heading\n\n```html\n<b>hi</b>\n```").unwrap();
-        doc.content.attrs.hints.push(Hint {
+        doc.content.attrs.inits.push(Init {
             selector: Selector::Expr(SelectorExpr::Simple(CompoundSelector {
                 kind: Some("CodeBlock".to_string()),
                 ..Default::default()
@@ -936,97 +1034,56 @@ See @fig:pic.";
     }
 
     #[test]
-    fn render_series_number_flat() {
-        let state = SeriesState {
-            counts: Vec::new(),
-            counter: 5,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["a".to_string()],
-                cycle: false,
-            },
-        };
-        assert_eq!(render_series_number(&state), "e");
+    fn format_value_flat() {
+        let val = Value::Number(5.0);
+        let fmts = vec![FormatToken::parse("a")];
+        assert_eq!(format_value(&val, &fmts, false), "e");
     }
 
     #[test]
-    fn render_series_number_hierarchical() {
-        let state = SeriesState {
-            counts: vec![2, 3],
-            counter: 0,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["I".to_string(), "1".to_string()],
-                cycle: false,
-            },
-        };
-        assert_eq!(render_series_number(&state), "II.3");
+    fn format_value_hierarchical() {
+        let val = Value::List(vec![Value::Number(2.0), Value::Number(3.0)]);
+        let fmts = vec![FormatToken::parse("I"), FormatToken::parse("1")];
+        assert_eq!(format_value(&val, &fmts, false), "II.3");
     }
 
     #[test]
-    fn render_series_number_hierarchical_with_counter() {
-        let state = SeriesState {
-            counts: vec![1],
-            counter: 4,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["I".to_string(), "1".to_string()],
-                cycle: false,
-            },
-        };
-        // Parent "I" + flat counter "4".
-        assert_eq!(render_series_number(&state), "I.4");
-    }
-
-    #[test]
-    fn get_format_token_cycling() {
-        let config = SeriesConfig {
-            parent: None,
-            formats: vec!["I".to_string(), "A".to_string()],
-            cycle: true,
-        };
+    fn get_format_at_cycling() {
+        let fmts = vec![FormatToken::parse("I"), FormatToken::parse("A")];
         // depth 0 → "I", depth 1 → "A", depth 2 → "I" (wraps)
         assert!(matches!(
-            get_format_token(&config, 0).format,
+            get_format_at(&fmts, 0, true).format,
             NumberFormat::RomanUpper
         ));
         assert!(matches!(
-            get_format_token(&config, 1).format,
+            get_format_at(&fmts, 1, true).format,
             NumberFormat::AlphaUpper
         ));
         assert!(matches!(
-            get_format_token(&config, 2).format,
+            get_format_at(&fmts, 2, true).format,
             NumberFormat::RomanUpper
         ));
     }
 
     #[test]
-    fn get_format_token_repeat_last() {
-        let config = SeriesConfig {
-            parent: None,
-            formats: vec!["I".to_string(), "1".to_string()],
-            cycle: false,
-        };
+    fn get_format_at_repeat_last() {
+        let fmts = vec![FormatToken::parse("I"), FormatToken::parse("1")];
         // depth 2 and beyond → "1" (repeat last)
         assert!(matches!(
-            get_format_token(&config, 2).format,
+            get_format_at(&fmts, 2, false).format,
             NumberFormat::Arabic
         ));
         assert!(matches!(
-            get_format_token(&config, 10).format,
+            get_format_at(&fmts, 10, false).format,
             NumberFormat::Arabic
         ));
     }
 
     #[test]
-    fn get_format_token_empty_defaults() {
-        let config = SeriesConfig {
-            parent: None,
-            formats: Vec::new(),
-            cycle: false,
-        };
+    fn get_format_at_empty_defaults() {
+        let fmts: Vec<FormatToken> = Vec::new();
         assert!(matches!(
-            get_format_token(&config, 0).format,
+            get_format_at(&fmts, 0, false).format,
             NumberFormat::Arabic
         ));
     }
@@ -1206,8 +1263,8 @@ See @fig:pic.";
         let mut doc = parse(input).unwrap();
         HoistDirectives.run(&mut doc);
         // The hint should be on the section that contained the directive
-        let has_hints = !doc.content.attrs.hints.is_empty()
-            || doc.content.children.iter().any(|c| !c.attrs.hints.is_empty());
+        let has_hints = !doc.content.attrs.inits.is_empty()
+            || doc.content.children.iter().any(|c| !c.attrs.inits.is_empty());
         assert!(has_hints, "hints should be hoisted to parent");
     }
 
@@ -1285,7 +1342,7 @@ See @fig:pic.";
         reset_id_counter();
         let mut doc = parse("```{=typst}\n#rect()\n```").unwrap();
         HoistDirectives.run(&mut doc);
-        CascadeHints.run(&mut doc);
+        CascadeInits.run(&mut doc);
         CompileBlocks::new(&TestCompiler).run(&mut doc);
 
         let raws = find_all(&doc.content, |n| matches!(n.kind, NodeKind::RawBlock { .. }));
@@ -1303,7 +1360,7 @@ See @fig:pic.";
         reset_id_counter();
         let mut doc = parse("```{=fail}\nbad\n```").unwrap();
         HoistDirectives.run(&mut doc);
-        CascadeHints.run(&mut doc);
+        CascadeInits.run(&mut doc);
         CompileBlocks::new(&TestCompiler).run(&mut doc);
 
         let raws = find_all(&doc.content, |n| matches!(n.kind, NodeKind::RawBlock { .. }));
@@ -1317,7 +1374,7 @@ See @fig:pic.";
         let input = "{@hint(code-block, preview=true)}\n\n```typst\n#circle()\n```";
         let mut doc = parse(input).unwrap();
         HoistDirectives.run(&mut doc);
-        CascadeHints.run(&mut doc);
+        CascadeInits.run(&mut doc);
         CompileBlocks::new(&TestCompiler).run(&mut doc);
 
         let codes = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }));
@@ -1334,7 +1391,7 @@ See @fig:pic.";
         let input = "{@hint(code-block, preview=latex)}\n\n```typst\nsource\n```";
         let mut doc = parse(input).unwrap();
         HoistDirectives.run(&mut doc);
-        CascadeHints.run(&mut doc);
+        CascadeInits.run(&mut doc);
         CompileBlocks::new(&TestCompiler).run(&mut doc);
 
         let codes = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CodeBlock { .. }));
@@ -1378,51 +1435,20 @@ See @fig:pic.";
         assert_eq!(get_number(figs[2]), Some("1"));
     }
 
-    // ── bump_depth ──
+    // ── interpolate_template ──
 
     #[test]
-    fn bump_depth_truncates_on_level_decrease() {
-        let mut locals = Locals::default();
-        locals.series.insert("s".into(), SeriesState {
-            counts: vec![2, 3, 1],
-            counter: 0,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["I".into(), "1".into(), "a".into()],
-                cycle: false,
-            },
-        });
-        bump_depth(&mut locals, "s", 2);
-        // Truncated to level 2, counter incremented
-        assert_eq!(locals.series["s"].counts, vec![2, 4]);
+    fn interpolate_template_basic() {
+        let mut props = HashMap::new();
+        props.insert("number".to_string(), Value::Text("I.1".to_string()));
+        assert_eq!(interpolate_template("{number}. ", &props), "I.1. ");
     }
 
     #[test]
-    fn bump_depth_resets_child_series() {
-        let mut locals = Locals::default();
-        locals.series.insert("ch".into(), SeriesState {
-            counts: Vec::new(),
-            counter: 0,
-            config: SeriesConfig {
-                parent: None,
-                formats: vec!["I".into()],
-                cycle: false,
-            },
-        });
-        locals.series.insert("fig".into(), SeriesState {
-            counts: Vec::new(),
-            counter: 5,
-            config: SeriesConfig {
-                parent: Some("ch".into()),
-                formats: vec!["1".into()],
-                cycle: false,
-            },
-        });
-        bump_depth(&mut locals, "ch", 1);
-        assert_eq!(locals.series["fig"].counter, 0, "child counter should reset");
+    fn interpolate_template_missing_key() {
+        let props = HashMap::new();
+        assert_eq!(interpolate_template("{missing} text", &props), " text");
     }
-
-    // ── incr_counter ──
 
     // ── get_compile_format ──
 
@@ -1431,6 +1457,256 @@ See @fig:pic.";
         let mut attrs = crate::ast::Attrs::default();
         attrs.properties.insert("preview".to_string(), Value::Text("latex".to_string()));
         assert_eq!(get_compile_format(&attrs, "typst"), "latex");
+    }
+
+    // ── Generic engine: new primitive tests ──
+
+    #[test]
+    fn var_and_on_flat_count() {
+        reset_id_counter();
+        let input = "\
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
+
+![First](a.png){#fig:first}
+
+![Second](b.png){#fig:second}
+
+![Third](c.png){#fig:third}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        assert_eq!(get_number(figs[2]), Some("3"));
+    }
+
+    #[test]
+    fn var_and_on_hierarchical() {
+        reset_id_counter();
+        let input = "\
+{@var(sec, [], format=[\"I\",\"1\"])}
+{@init(heading, series=\"sec\")}
+{@on([series=\"sec\"], @inc(sec), @store(number, sec))}
+
+# Introduction
+
+## Background
+
+## Methods
+
+# Results";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 4);
+        assert_eq!(get_number(headings[0]), Some("I"));
+        assert_eq!(get_number(headings[1]), Some("I.1"));
+        assert_eq!(get_number(headings[2]), Some("I.2"));
+        assert_eq!(get_number(headings[3]), Some("II"));
+    }
+
+    #[test]
+    fn hierarchical_skips_leading_zeros_when_h1_absent() {
+        reset_id_counter();
+        let input = "\
+{@var(sec, [], format=[\"I\",\"1\"])}
+{@init(heading, series=\"sec\")}
+{@on([series=\"sec\"], @inc(sec), @store(number, sec))}
+
+## Background
+
+## Methods
+
+### Detail";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 3);
+        // Leading zero at depth 0 (no h1 seen) is skipped
+        assert_eq!(get_number(headings[0]), Some("1"));
+        assert_eq!(get_number(headings[1]), Some("2"));
+        assert_eq!(get_number(headings[2]), Some("2.1"));
+    }
+
+    #[test]
+    fn on_reset() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
+{@on([series=\"sec\"], @reset(fig))}
+
+# Chapter One
+
+![A](a.png){#fig:a}
+
+![B](b.png){#fig:b}
+
+# Chapter Two
+
+![C](c.png){#fig:c}";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 3);
+        assert_eq!(get_number(figs[0]), Some("1"));
+        assert_eq!(get_number(figs[1]), Some("2"));
+        assert_eq!(get_number(figs[2]), Some("1"), "should reset after heading");
+    }
+
+    #[test]
+    fn on_set_property() {
+        reset_id_counter();
+        let input = "\
+{@on(figure, @set(highlighted, true))}
+
+![Pic](a.png)";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let figs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(figs.len(), 1);
+        assert!(
+            figs[0].attrs.properties.contains_key("highlighted"),
+            "figure should have highlighted property"
+        );
+    }
+
+    #[test]
+    fn on_prepend() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@on(heading, @prepend(@text(\"{number}. \")))}
+
+# Introduction";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 1);
+        // First child should be the prepended text
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I. ");
+        } else {
+            panic!("expected Text node, got {:?}", first_child.kind);
+        }
+    }
+
+    #[test]
+    fn on_append() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@on(heading, @append(@text(\" §\")))}
+
+# Introduction";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 1);
+        // Last child should be the appended text
+        let last_child = headings[0].children.last().unwrap();
+        if let NodeKind::Text(ref t) = last_child.kind {
+            assert_eq!(t, " §");
+        } else {
+            panic!("expected Text node, got {:?}", last_child.kind);
+        }
+    }
+
+    #[test]
+    fn content_sugar() {
+        reset_id_counter();
+        let input = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@content(heading, \"{number}. \")}
+
+# Introduction
+
+## Background";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 2);
+        // Check that number prefix was prepended
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I. ");
+        } else {
+            panic!("expected Text node");
+        }
+        let first_child = &headings[1].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I.1. ");
+        } else {
+            panic!("expected Text node");
+        }
+    }
+
+    #[test]
+    fn prepend_missing_property() {
+        reset_id_counter();
+        let input = "\
+{@on(heading, @prepend(@text(\"{missing}prefix\")))}
+
+# Title";
+        let mut doc = parse(input).unwrap();
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "prefix", "missing property should interpolate as empty");
+        } else {
+            panic!("expected Text node");
+        }
+    }
+
+    #[test]
+    fn series_expands_to_primitives() {
+        // @series(fig, counts=figure) should produce the same result
+        // as manual @var + @init + @on
+        reset_id_counter();
+        let input_series = "\
+{@series(fig, counts=figure)}
+
+![A](a.png){#fig:a}
+
+![B](b.png){#fig:b}";
+        let mut doc_series = parse(input_series).unwrap();
+        resolve_document(&mut doc_series);
+
+        let figs_series = find_all(&doc_series.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(get_number(figs_series[0]), Some("1"));
+        assert_eq!(get_number(figs_series[1]), Some("2"));
+
+        reset_id_counter();
+        let input_manual = "\
+{@var(fig, 0, format=\"1\")}
+{@init(figure, series=\"fig\")}
+{@on([series=\"fig\"], @inc(fig), @store(number, fig))}
+
+![A](a.png){#fig:a}
+
+![B](b.png){#fig:b}";
+        let mut doc_manual = parse(input_manual).unwrap();
+        resolve_document(&mut doc_manual);
+
+        let figs_manual = find_all(&doc_manual.content, |n| matches!(n.kind, NodeKind::Figure));
+        assert_eq!(get_number(figs_manual[0]), Some("1"));
+        assert_eq!(get_number(figs_manual[1]), Some("2"));
     }
 
 }

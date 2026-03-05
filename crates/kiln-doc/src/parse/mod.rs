@@ -3,6 +3,8 @@ mod block;
 mod inline;
 mod section;
 
+pub use attrs::parse_prelude;
+
 use crate::ast::{Attrs, Document, Metadata, Node, NodeKind};
 
 use attrs::{
@@ -748,7 +750,7 @@ mod tests {
             .content
             .children
             .iter()
-            .any(|n| !n.attrs.hints.is_empty());
+            .any(|n| !n.attrs.inits.is_empty());
         assert!(has_hint);
     }
 
@@ -761,9 +763,12 @@ mod tests {
             .children
             .iter()
             .flat_map(|n| &n.attrs.declarations)
-            .next()?;
-        let Declaration::Series { config, .. } = decl;
-        Some(config.clone())
+            .find(|d| matches!(d, Declaration::Series { .. }))?;
+        if let Declaration::Series { config, .. } = decl {
+            Some(config.clone())
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -806,7 +811,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 2, "should produce 2 hints for 2 properties");
     }
@@ -818,7 +823,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "theme");
@@ -832,7 +837,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert!(matches!(&hints[0].value, Value::Text(s) if s == "Figure"));
@@ -846,7 +851,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert!(matches!(&hints[0].value, Value::Bool(true)));
@@ -860,7 +865,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert!(matches!(&hints[0].value, Value::Bool(false)));
@@ -874,7 +879,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert!(matches!(&hints[0].value, Value::Number(n) if *n == 4.0));
@@ -888,7 +893,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert!(hints.is_empty());
     }
@@ -900,7 +905,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert!(hints.is_empty());
     }
@@ -909,9 +914,9 @@ mod tests {
     fn hint_this_selector() {
         use crate::ast::Selector;
         let doc = parse_ok("# Title {@hint(this, color=red)}");
-        fn find_hint(node: &Node) -> Option<&crate::ast::Hint> {
+        fn find_hint(node: &Node) -> Option<&crate::ast::Init> {
             node.attrs
-                .hints
+                .inits
                 .iter()
                 .find(|h| matches!(h.selector, Selector::This))
                 .or_else(|| node.children.iter().find_map(find_hint))
@@ -927,7 +932,7 @@ mod tests {
             .content
             .children
             .iter()
-            .flat_map(|n| n.attrs.hints.iter())
+            .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "theme");
@@ -1021,7 +1026,7 @@ mod tests {
         let hint = doc
             .content
             .attrs
-            .hints
+            .inits
             .iter()
             .find(|h| h.property == "series");
         assert!(hint.is_some(), "counts= should generate a series hint");
@@ -1159,7 +1164,7 @@ mod tests {
         let doc = parse_ok("{@hint(figure.wide, layout=\"full\")}");
         let mut doc = doc;
         crate::resolve::HoistDirectives.run(&mut doc);
-        let hint = doc.content.attrs.hints.iter().find(|h| h.property == "layout");
+        let hint = doc.content.attrs.inits.iter().find(|h| h.property == "layout");
         assert!(hint.is_some());
         assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "full"));
     }
@@ -1184,7 +1189,7 @@ mod tests {
         // Also verify that counts= produces a hint
         let mut doc2 = parse_ok("{@series(sec, counts=heading)}");
         crate::resolve::HoistDirectives.run(&mut doc2);
-        let hint = doc2.content.attrs.hints.iter().find(|h| h.property == "series");
+        let hint = doc2.content.attrs.inits.iter().find(|h| h.property == "series");
         assert!(hint.is_some());
         assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "sec"));
     }
@@ -1382,7 +1387,7 @@ mod tests {
         let doc = parse_ok("{@hint(code-block[lang=\"rust\"], theme=monokai)}");
         let mut doc = doc;
         crate::resolve::HoistDirectives.run(&mut doc);
-        let hint = doc.content.attrs.hints.iter().find(|h| h.property == "theme");
+        let hint = doc.content.attrs.inits.iter().find(|h| h.property == "theme");
         assert!(hint.is_some());
         assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "monokai"));
     }
@@ -1395,6 +1400,6 @@ mod tests {
         let doc = parse_ok("{@hint(figure, series=figs, label=\"Figure {n}\")}");
         let mut doc = doc;
         crate::resolve::HoistDirectives.run(&mut doc);
-        assert!(doc.content.attrs.hints.len() >= 2);
+        assert!(doc.content.attrs.inits.len() >= 2);
     }
 }

@@ -1,4 +1,4 @@
-//! CSS-like selector parsing and matching for hint cascade.
+//! CSS-like selector parsing and matching for init cascade.
 //!
 //! Selectors match nodes in the document tree. The syntax supports:
 //! - Kind names: `figure`, `code-block`, `h` (bare or alias)

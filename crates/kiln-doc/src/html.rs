@@ -1355,4 +1355,41 @@ mod tests {
         let html = render_html(&doc);
         assert!(html.contains("inner"), "custom node should render children transparently");
     }
+
+    #[test]
+    fn numbered_headings_html_integration() {
+        use crate::ast::reset_id_counter;
+        use crate::resolve::resolve_document;
+        reset_id_counter();
+        let md = "\
+{@series(sec, counts=heading, formats=[\"I\",\"1\"])}
+{@content(heading, \"{number}. \")}
+
+# Introduction
+
+## Background";
+        let mut doc = crate::parse::parse(md).unwrap();
+        resolve_document(&mut doc);
+        let html = render_html(&doc);
+        assert!(html.contains("I. Introduction"), "h1 should have Roman numeral: {html}");
+        assert!(html.contains("I.1. Background"), "h2 should have hierarchical number: {html}");
+    }
+
+    #[test]
+    fn cross_ref_resolves_to_label_html() {
+        use crate::ast::reset_id_counter;
+        use crate::resolve::resolve_document;
+        reset_id_counter();
+        let md = "\
+{@series(fig, counts=figure)}
+{@init(figure, label=\"Figure {n}\")}
+
+![Arch](arch.png){#fig:arch}
+
+See @fig:arch.";
+        let mut doc = crate::parse::parse(md).unwrap();
+        resolve_document(&mut doc);
+        let html = render_html(&doc);
+        assert!(html.contains(">Figure 1</a>"), "cross-ref should resolve to 'Figure 1': {html}");
+    }
 }

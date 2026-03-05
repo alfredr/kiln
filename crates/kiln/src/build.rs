@@ -9,6 +9,8 @@ use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
 use crate::template::{load_templates, render_index, render_page, render_post};
 use crate::world::KilnWorld;
 
+const BUILTIN_PRELUDE: &str = include_str!("prelude.kiln");
+
 /// A RawBlockCompiler that compiles Typst blocks using KilnWorld.
 struct TypstCompiler<'a> {
     project_root: &'a Path,
@@ -107,7 +109,15 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     }
 
     let compiler = TypstCompiler { project_root };
-    let hints = config_hints(&config.hints);
+
+    // Load prelude (built-in or custom) and merge with config inits
+    let prelude_text = match config.build.prelude.as_deref() {
+        None => BUILTIN_PRELUDE.to_string(),
+        Some(path) => std::fs::read_to_string(project_root.join(path))
+            .with_context(|| format!("failed to read prelude: {path}"))?,
+    };
+    let (declarations, mut inits) = kiln_doc::parse_prelude(&prelude_text);
+    inits.extend(config_inits(&config.hints));
 
     // Compile the content tree
     compile_tree(
@@ -117,7 +127,8 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
         &output_dir,
         &compiler,
         &tree,
-        &hints,
+        &inits,
+        &declarations,
     )?;
 
     // Generate index page
@@ -140,7 +151,8 @@ fn compile_tree(
     output_dir: &Path,
     compiler: &TypstCompiler,
     tree: &ContentTree,
-    hints: &[kiln_doc::ast::Hint],
+    inits: &[kiln_doc::ast::Init],
+    declarations: &[kiln_doc::ast::Declaration],
 ) -> anyhow::Result<()> {
     // Collect child content directory names for asset isolation
     let child_dirs: Vec<&str> = node
@@ -169,12 +181,23 @@ fn compile_tree(
             output_dir.join(&item.path)
         };
 
-        let mut inject = InjectHints(hints.to_vec());
+        let mut inject = InjectPrelude {
+            inits: inits.to_vec(),
+            declarations: declarations.to_vec(),
+        };
         let mut hoist = kiln_doc::resolve::HoistDirectives;
-        let mut cascade = kiln_doc::resolve::CascadeHints;
+        let mut cascade = kiln_doc::resolve::CascadeInits;
+        let mut execute = kiln_doc::resolve::ExecuteProgram;
+        let mut cross_refs = kiln_doc::resolve::ResolveCrossRefs;
         let mut compile = kiln_doc::resolve::CompileBlocks::new(compiler);
-        let passes: &mut [&mut dyn kiln_doc::visit::Pass] =
-            &mut [&mut inject, &mut hoist, &mut cascade, &mut compile];
+        let passes: &mut [&mut dyn kiln_doc::visit::Pass] = &mut [
+            &mut inject,
+            &mut hoist,
+            &mut cascade,
+            &mut execute,
+            &mut cross_refs,
+            &mut compile,
+        ];
 
         let render_fn = if is_post { render_post } else { render_page };
 
@@ -189,14 +212,14 @@ fn compile_tree(
     }
 
     for child in &node.children {
-        compile_tree(config, tera, child, output_dir, compiler, tree, hints)?;
+        compile_tree(config, tera, child, output_dir, compiler, tree, inits, declarations)?;
     }
 
     Ok(())
 }
 
-fn config_hints(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Hint> {
-    use kiln_doc::ast::{Hint, Value};
+fn config_inits(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Init> {
+    use kiln_doc::ast::{Init, Value};
 
     configs
         .iter()
@@ -208,7 +231,7 @@ fn config_hints(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Hin
 
             cfg.properties
                 .iter()
-                .map(|(k, v)| Hint {
+                .map(|(k, v)| Init {
                     selector: selector.clone(),
                     property: k.clone(),
                     value: match v {
@@ -256,12 +279,19 @@ fn parse_config_selector(cfg: &crate::config::HintConfig) -> Option<kiln_doc::as
     None
 }
 
-/// Pass that injects config-level hints onto the document root.
-struct InjectHints(Vec<kiln_doc::ast::Hint>);
+/// Pass that injects prelude declarations and config-level inits onto the document root.
+struct InjectPrelude {
+    inits: Vec<kiln_doc::ast::Init>,
+    declarations: Vec<kiln_doc::ast::Declaration>,
+}
 
-impl kiln_doc::visit::Pass for InjectHints {
+impl kiln_doc::visit::Pass for InjectPrelude {
     fn run(&mut self, doc: &mut kiln_doc::ast::Document) {
-        doc.content.attrs.hints.extend(self.0.iter().cloned());
+        doc.content.attrs.inits.extend(self.inits.iter().cloned());
+        doc.content
+            .attrs
+            .declarations
+            .extend(self.declarations.iter().cloned());
     }
 }
 
@@ -451,7 +481,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── config_hints / parse_config_selector tests ──
+    // ── config_inits / parse_config_selector tests ──
 
     fn make_hint_config(
         selector: Option<&str>,
@@ -478,7 +508,7 @@ mod tests {
             None,
             vec![("theme", toml::Value::String("dark".into()))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "theme");
     }
@@ -492,7 +522,7 @@ mod tests {
             None,
             vec![("numbering", toml::Value::Boolean(true))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "numbering");
         assert!(matches!(&hints[0].value, kiln_doc::ast::Value::Bool(true)));
@@ -507,7 +537,7 @@ mod tests {
             None,
             vec![("layout", toml::Value::String("full".into()))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "layout");
     }
@@ -521,7 +551,7 @@ mod tests {
             Some("fig-main"),
             vec![("position", toml::Value::String("top".into()))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "position");
     }
@@ -535,7 +565,7 @@ mod tests {
             None,
             vec![("x", toml::Value::String("y".into()))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert!(hints.is_empty());
     }
 
@@ -548,7 +578,7 @@ mod tests {
             None,
             vec![("x", toml::Value::String("y".into()))],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert!(hints.is_empty());
     }
 
@@ -567,7 +597,7 @@ mod tests {
                 ("label", toml::Value::String("hello".into())),
             ],
         );
-        let hints = config_hints(&[cfg]);
+        let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 4);
 
         let find = |name: &str| hints.iter().find(|h| h.property == name).unwrap();
@@ -593,7 +623,7 @@ mod tests {
             None,
             vec![("b", toml::Value::Boolean(true))],
         );
-        let hints = config_hints(&[cfg1, cfg2]);
+        let hints = config_inits(&[cfg1, cfg2]);
         assert_eq!(hints.len(), 2);
     }
 }

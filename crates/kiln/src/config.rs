@@ -36,6 +36,9 @@ pub struct BuildConfig {
     pub static_dir: PathBuf,
     #[serde(default)]
     pub slug_pattern: Option<String>,
+    /// Path to a custom `.kiln` prelude file. Omit to use the built-in prelude.
+    #[serde(default)]
+    pub prelude: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +63,7 @@ impl Default for BuildConfig {
             template_dir: default_template_dir(),
             static_dir: default_static_dir(),
             slug_pattern: None,
+            prelude: None,
         }
     }
 }
@@ -161,5 +165,31 @@ mod tests {
 
         let result = Config::load(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_config_with_prelude() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("kiln.toml"),
+            "[site]\ntitle = \"Test\"\n\n[build]\nprelude = \"custom.kiln\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.build.prelude.as_deref(), Some("custom.kiln"));
+    }
+
+    #[test]
+    fn load_config_without_prelude() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("kiln.toml"),
+            "[site]\ntitle = \"Test\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load(tmp.path()).unwrap();
+        assert!(config.build.prelude.is_none());
     }
 }

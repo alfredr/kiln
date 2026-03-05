@@ -1,4 +1,7 @@
-use crate::ast::{Attrs, Declaration, Hint, Node, NodeKind, SeriesConfig, Value};
+use crate::ast::{
+    Action, Attrs, Declaration, FormatToken, Init, Node, NodeKind, OnDirective, SeriesConfig,
+    Value, VarDecl,
+};
 
 use super::inline::find_matching_delim;
 
@@ -149,12 +152,12 @@ pub(super) fn maybe_extract_trailing_attrs_from_children(children: &mut Vec<Node
     }
 }
 
-/// Parse a standalone `@directive(...)` into a node carrying declarations/hints.
+/// Parse a standalone `@directive(...)` into a node carrying declarations/inits.
 pub(super) fn parse_directive_to_node(content: &str) -> Option<Node> {
     let mut node = Node::new(NodeKind::Custom {
         content_type: "directive".to_string(),
     });
-    // content looks like: @series(...) or @hint(...)
+    // content looks like: @series(...) or @init(...)
     let content = content.trim();
     if !content.starts_with('@') {
         return None;
@@ -246,16 +249,58 @@ fn scan_id_or_class(sigil: char, chars: &[char], pos: usize, attrs: &mut Attrs) 
     new_pos
 }
 
+/// Parse a `.kiln` prelude file into declarations and inits.
+///
+/// Each non-empty, non-comment line is a bare directive: `@series(fig, counts=figure)`.
+/// Lines starting with `#` are comments. The leading `@` is optional.
+pub fn parse_prelude(text: &str) -> (Vec<Declaration>, Vec<Init>) {
+    let mut attrs = Attrs::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix('@').unwrap_or(line);
+        if let Some(paren) = line.find('(') {
+            let cmd = &line[..paren];
+            // Find matching closing paren (last ')' in line)
+            if let Some(close) = line.rfind(')') {
+                let args = &line[paren + 1..close];
+                apply_directive(&mut attrs, cmd, args);
+            }
+        }
+    }
+    (attrs.declarations, attrs.inits)
+}
+
 fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
     match cmd {
         "series" => {
-            if let Some((decl, hints)) = parse_series_directive_full(args) {
+            if let Some((decl, inits, on_directives)) = parse_series_directive_full(args) {
                 attrs.declarations.push(decl);
-                attrs.hints.extend(hints);
+                attrs.inits.extend(inits);
+                for on in on_directives {
+                    attrs.declarations.push(Declaration::OnDirective(on));
+                }
             }
         }
-        "hint" => {
-            attrs.hints.extend(parse_hint_directive(args));
+        "init" | "hint" => {
+            attrs.inits.extend(parse_init_directive(args));
+        }
+        "var" => {
+            if let Some(var_decl) = parse_var_directive(args) {
+                attrs.declarations.push(Declaration::VarDecl(var_decl));
+            }
+        }
+        "on" => {
+            if let Some(on) = parse_on_directive(args) {
+                attrs.declarations.push(Declaration::OnDirective(on));
+            }
+        }
+        "content" => {
+            if let Some(on) = parse_content_directive(args) {
+                attrs.declarations.push(Declaration::OnDirective(on));
+            }
         }
         _ => {}
     }
@@ -263,9 +308,12 @@ fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
 
 /// Parse `@series(fig, counts=figure, parent=sec, formats=["I","1"], cycle=true)`.
 ///
-/// The `counts=SELECTOR` sugar generates a `Hint` on the enclosing node that
-/// sets `series=ID` on matching descendants.  Returns `(Declaration, Vec<Hint>)`.
-fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
+/// The `counts=SELECTOR` sugar generates an `Init` on the enclosing node that
+/// sets `series=ID` on matching descendants, plus `OnDirective`s for the triggers.
+/// Returns `(Declaration, Vec<Init>, Vec<OnDirective>)`.
+fn parse_series_directive_full(
+    args: &str,
+) -> Option<(Declaration, Vec<Init>, Vec<OnDirective>)> {
     let parts = split_directive_args(args);
     if parts.is_empty() {
         return None;
@@ -274,7 +322,7 @@ fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
     let mut parent: Option<String> = None;
     let mut formats: Vec<String> = vec!["1".to_string()];
     let mut cycle = false;
-    let mut counts_hints: Vec<Hint> = Vec::new();
+    let mut counts_inits: Vec<Init> = Vec::new();
 
     for (key, val) in &parts[1..] {
         match key.as_str() {
@@ -284,9 +332,9 @@ fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
                 formats = parse_format_list(val);
             }
             "counts" => {
-                // `counts=SELECTOR` expands to a hint: @hint(SELECTOR, series="ID")
-                counts_hints.extend(
-                    crate::selector::parse_selector(val).map(|selector| Hint {
+                // `counts=SELECTOR` expands to an init: @init(SELECTOR, series="ID")
+                counts_inits.extend(
+                    crate::selector::parse_selector(val).map(|selector| Init {
                         selector,
                         property: "series".to_string(),
                         value: Value::Text(id.clone()),
@@ -296,6 +344,37 @@ fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
             _ => {}
         }
     }
+
+    // Build OnDirective: @on([series="ID"], @inc(ID), @store(number, ID))
+    let series_selector = series_attr_selector(&id);
+    let format_tokens: Vec<FormatToken> = formats.iter().map(|f| FormatToken::parse(f)).collect();
+    let on_actions = vec![
+        Action::Increment { var: id.clone() },
+        Action::StoreFormatted {
+            var: id.clone(),
+            property: "number".to_string(),
+            formats: format_tokens,
+            cycle,
+        },
+    ];
+
+    let mut on_directives = vec![OnDirective {
+        selector: series_selector.clone(),
+        actions: on_actions,
+    }];
+
+    // If parent is set, add @on([series="PARENT"], @reset(ID))
+    if let Some(ref parent_id) = parent {
+        let parent_selector = series_attr_selector(parent_id);
+        on_directives.push(OnDirective {
+            selector: parent_selector,
+            actions: vec![Action::Reset {
+                var: id.clone(),
+                to: initial_value_for_formats(&formats),
+            }],
+        });
+    }
+
     let decl = Declaration::Series {
         id,
         config: SeriesConfig {
@@ -304,7 +383,215 @@ fn parse_series_directive_full(args: &str) -> Option<(Declaration, Vec<Hint>)> {
             cycle,
         },
     };
-    Some((decl, counts_hints))
+    Some((decl, counts_inits, on_directives))
+}
+
+/// Build a selector matching `[series="ID"]`.
+fn series_attr_selector(id: &str) -> crate::ast::Selector {
+    use crate::ast::*;
+    Selector::Expr(SelectorExpr::Simple(CompoundSelector {
+        attr_expr: Some(AttrExpr::Pred(AttrPred {
+            name: "series".to_string(),
+            op: AttrOp::Eq(id.to_string()),
+        })),
+        ..Default::default()
+    }))
+}
+
+/// Determine the initial value for a series from its format list.
+/// Multiple formats → hierarchical (List), single format → flat (Number).
+fn initial_value_for_formats(formats: &[String]) -> Value {
+    if formats.len() > 1 {
+        Value::List(vec![])
+    } else {
+        Value::Number(0.0)
+    }
+}
+
+/// Parse `@var(name, value, format=...)`.
+///
+/// Examples: `@var(fig, 0)`, `@var(sec, [], format=["I","1"])`, `@var(flag, false)`
+fn parse_var_directive(args: &str) -> Option<VarDecl> {
+    let parts = split_directive_args(args);
+    if parts.is_empty() {
+        return None;
+    }
+    let name = parts[0].0.clone();
+
+    // Parse initial value (second positional arg)
+    let value = if parts.len() > 1 {
+        parse_initial_value(&parts[1].1)
+    } else {
+        Value::Number(0.0)
+    };
+
+    let mut formats = Vec::new();
+    let mut cycle = false;
+
+    for (key, val) in &parts[2..] {
+        match key.as_str() {
+            "format" | "formats" => formats = parse_format_list(val),
+            "cycle" => cycle = val == "true",
+            _ => {}
+        }
+    }
+
+    Some(VarDecl {
+        name,
+        value,
+        formats,
+        cycle,
+    })
+}
+
+/// Parse an initial value string: `0` → Number, `[]` → List, `true/false` → Bool, etc.
+fn parse_initial_value(s: &str) -> Value {
+    let s = s.trim();
+    match s {
+        "[]" => Value::List(vec![]),
+        "true" => Value::Bool(true),
+        "false" => Value::Bool(false),
+        _ => {
+            if let Ok(n) = s.parse::<f64>() {
+                Value::Number(n)
+            } else {
+                Value::Text(s.trim_matches('"').to_string())
+            }
+        }
+    }
+}
+
+/// Parse `@on(selector, @action1(...), @action2(...), ...)`.
+///
+/// The first argument(s) before the first `@`-prefixed token form the selector.
+/// All `@`-prefixed tokens are action calls.
+fn parse_on_directive(args: &str) -> Option<OnDirective> {
+    let parts = split_top_level_commas(args);
+    if parts.is_empty() {
+        return None;
+    }
+
+    // Find the boundary: first part starting with @
+    let action_start = parts.iter().position(|p| p.trim().starts_with('@'));
+    let (selector_parts, action_parts) = match action_start {
+        Some(idx) => (&parts[..idx], &parts[idx..]),
+        None => return None, // no actions
+    };
+
+    let selector_str = selector_parts.join(",");
+    let selector = crate::selector::parse_selector(selector_str.trim())?;
+
+    let actions: Vec<Action> = action_parts
+        .iter()
+        .filter_map(|a| parse_action_call(a.trim()))
+        .collect();
+
+    if actions.is_empty() {
+        return None;
+    }
+
+    Some(OnDirective { selector, actions })
+}
+
+/// Parse a single `@action(args)` call.
+fn parse_action_call(s: &str) -> Option<Action> {
+    let s = s.trim();
+    if !s.starts_with('@') {
+        return None;
+    }
+    let rest = &s[1..];
+    let (cmd, args) = if let Some(paren) = rest.find('(') {
+        let close = rest.rfind(')')?;
+        (&rest[..paren], rest[paren + 1..close].trim())
+    } else {
+        (rest, "")
+    };
+
+    match cmd {
+        "inc" => Some(Action::Increment {
+            var: args.trim().to_string(),
+        }),
+        "reset" => {
+            let parts = split_directive_args(args);
+            let var = parts.first()?.0.clone();
+            // Reset to 0 by default; the engine will use the VarDecl's initial value
+            let to = if parts.len() > 1 {
+                parse_initial_value(&parts[1].1)
+            } else {
+                Value::Number(0.0)
+            };
+            Some(Action::Reset { var, to })
+        }
+        "store" => {
+            let parts = split_directive_args(args);
+            if parts.len() < 2 {
+                return None;
+            }
+            let property = parts[0].0.clone();
+            let var = parts[1].0.clone();
+            // Formats come from the VarDecl; at this level we don't know them
+            Some(Action::StoreFormatted {
+                var,
+                property,
+                formats: Vec::new(),
+                cycle: false,
+            })
+        }
+        "set" => {
+            let parts = split_directive_args(args);
+            if parts.len() < 2 {
+                return None;
+            }
+            let property = parts[0].0.clone();
+            let value = parse_init_value(&parts[1].1);
+            Some(Action::SetProperty { property, value })
+        }
+        "prepend" => {
+            let template = parse_text_arg(args);
+            Some(Action::Prepend { template })
+        }
+        "append" => {
+            let template = parse_text_arg(args);
+            Some(Action::Append { template })
+        }
+        "content" => {
+            // @content("template") is sugar for @prepend(@text("template"))
+            let template = parse_text_arg(args);
+            Some(Action::Prepend { template })
+        }
+        _ => None,
+    }
+}
+
+/// Parse the text argument from `@text("template")` or a bare `"template"` string.
+fn parse_text_arg(args: &str) -> String {
+    let args = args.trim();
+    // Handle @text("...") wrapper
+    if args.starts_with("@text(") {
+        let inner = args
+            .strip_prefix("@text(")
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(args);
+        return inner.trim().trim_matches('"').to_string();
+    }
+    args.trim_matches('"').to_string()
+}
+
+/// Parse `@content(selector, "template")` — sugar for `@on(selector, @prepend(@text("template")))`.
+fn parse_content_directive(args: &str) -> Option<OnDirective> {
+    let parts = split_top_level_commas(args);
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let selector_str = parts[0].trim();
+    let selector = crate::selector::parse_selector(selector_str)?;
+    let template = parts[1..].join(",").trim().trim_matches('"').to_string();
+
+    Some(OnDirective {
+        selector,
+        actions: vec![Action::Prepend { template }],
+    })
 }
 
 /// Parse a format list like `["I","1","a"]` into a `Vec<String>`.
@@ -323,14 +610,14 @@ fn parse_format_list(s: &str) -> Vec<String> {
     }
 }
 
-/// Parse `@hint(figure.wide, layout="full", position="top")`.
+/// Parse `@init(figure.wide, layout="full", position="top")`.
 ///
 /// The args are split into a selector portion and property assignments.
 /// The boundary is the first top-level comma-separated token that looks
 /// like a property assignment (`key=value` where key is a bare identifier).
-/// Returns one `Hint` per property, all sharing the same selector.
-fn parse_hint_directive(args: &str) -> Vec<Hint> {
-    let parts = split_top_level_hint_commas(args);
+/// Returns one `Init` per property, all sharing the same selector.
+fn parse_init_directive(args: &str) -> Vec<Init> {
+    let parts = split_top_level_commas(args);
     if parts.is_empty() {
         return vec![];
     }
@@ -351,21 +638,21 @@ fn parse_hint_directive(args: &str) -> Vec<Hint> {
         None => return vec![],
     };
 
-    let mut hints = Vec::new();
+    let mut inits = Vec::new();
     for prop in prop_parts {
         let prop = prop.trim();
         if let Some(eq) = find_top_level_eq(prop) {
             let key = prop[..eq].trim().to_string();
             let val_str = prop[eq + 1..].trim();
-            let value = parse_hint_value(val_str);
-            hints.push(Hint {
+            let value = parse_init_value(val_str);
+            inits.push(Init {
                 selector: selector.clone(),
                 property: key,
                 value,
             });
         }
     }
-    hints
+    inits
 }
 
 /// Check if a comma-separated token is a property assignment (bare identifier followed by `=`).
@@ -400,8 +687,8 @@ fn is_property_token(token: &str) -> bool {
     false
 }
 
-/// Parse a hint property value string into a `Value`.
-fn parse_hint_value(s: &str) -> Value {
+/// Parse an init property value string into a `Value`.
+fn parse_init_value(s: &str) -> Value {
     let s = s.trim().trim_matches('"');
     match s {
         "true" => Value::Bool(true),
@@ -416,8 +703,8 @@ fn parse_hint_value(s: &str) -> Value {
     }
 }
 
-/// Split hint args on top-level commas (not inside `[...]`, `(...)`, or `"`).
-fn split_top_level_hint_commas(input: &str) -> Vec<String> {
+/// Split init args on top-level commas (not inside `[...]`, `(...)`, or `"`).
+fn split_top_level_commas(input: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut depth = 0i32;
@@ -740,7 +1027,7 @@ mod tests {
     fn brace_attrs_directive() {
         let mut attrs = Attrs::default();
         apply_brace_attrs(&mut attrs, "@hint(figure, series=figs)");
-        assert!(!attrs.hints.is_empty());
+        assert!(!attrs.inits.is_empty());
     }
 
     #[test]
@@ -777,7 +1064,7 @@ mod tests {
         let node = parse_directive_to_node("@hint(figure, series=figs)");
         assert!(node.is_some());
         let n = node.unwrap();
-        assert!(!n.attrs.hints.is_empty());
+        assert!(!n.attrs.inits.is_empty());
     }
 
     #[test]
@@ -839,36 +1126,36 @@ mod tests {
         assert!(children.is_empty());
     }
 
-    // ── parse_hint_value ──
+    // ── parse_init_value ──
 
     #[test]
     fn hint_value_true() {
-        assert!(matches!(parse_hint_value("true"), Value::Bool(true)));
+        assert!(matches!(parse_init_value("true"), Value::Bool(true)));
     }
 
     #[test]
     fn hint_value_false() {
-        assert!(matches!(parse_hint_value("false"), Value::Bool(false)));
+        assert!(matches!(parse_init_value("false"), Value::Bool(false)));
     }
 
     #[test]
     fn hint_value_number() {
-        assert!(matches!(parse_hint_value("42"), Value::Number(n) if n == 42.0));
+        assert!(matches!(parse_init_value("42"), Value::Number(n) if n == 42.0));
     }
 
     #[test]
     fn hint_value_float() {
-        assert!(matches!(parse_hint_value("2.5"), Value::Number(n) if (n - 2.5).abs() < 0.01));
+        assert!(matches!(parse_init_value("2.5"), Value::Number(n) if (n - 2.5).abs() < 0.01));
     }
 
     #[test]
     fn hint_value_text() {
-        assert!(matches!(parse_hint_value("hello"), Value::Text(ref s) if s == "hello"));
+        assert!(matches!(parse_init_value("hello"), Value::Text(ref s) if s == "hello"));
     }
 
     #[test]
     fn hint_value_quoted() {
-        assert!(matches!(parse_hint_value("\"hello\""), Value::Text(ref s) if s == "hello"));
+        assert!(matches!(parse_init_value("\"hello\""), Value::Text(ref s) if s == "hello"));
     }
 
     // ── is_property_token ──
@@ -908,30 +1195,30 @@ mod tests {
         assert!(!is_property_token(""));
     }
 
-    // ── split_top_level_hint_commas ──
+    // ── split_top_level_commas ──
 
     #[test]
     fn split_commas_simple() {
-        let parts = split_top_level_hint_commas("a, b, c");
+        let parts = split_top_level_commas("a, b, c");
         assert_eq!(parts, vec!["a", " b", " c"]);
     }
 
     #[test]
     fn split_commas_nested_brackets() {
-        let parts = split_top_level_hint_commas("sel[a,b], key=val");
+        let parts = split_top_level_commas("sel[a,b], key=val");
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0], "sel[a,b]");
     }
 
     #[test]
     fn split_commas_quoted() {
-        let parts = split_top_level_hint_commas("key=\"a,b\", other=c");
+        let parts = split_top_level_commas("key=\"a,b\", other=c");
         assert_eq!(parts.len(), 2);
     }
 
     #[test]
     fn split_commas_no_comma() {
-        let parts = split_top_level_hint_commas("single");
+        let parts = split_top_level_commas("single");
         assert_eq!(parts, vec!["single"]);
     }
 
@@ -1029,36 +1316,36 @@ mod tests {
         assert!(list.is_empty());
     }
 
-    // ── parse_hint_directive ──
+    // ── parse_init_directive ──
 
     #[test]
     fn hint_directive_simple() {
-        let hints = parse_hint_directive("figure, series=figs");
+        let hints = parse_init_directive("figure, series=figs");
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "series");
     }
 
     #[test]
     fn hint_directive_multiple_props() {
-        let hints = parse_hint_directive("figure, series=figs, label=\"Figure {n}\"");
+        let hints = parse_init_directive("figure, series=figs, label=\"Figure {n}\"");
         assert_eq!(hints.len(), 2);
     }
 
     #[test]
     fn hint_directive_no_props() {
-        let hints = parse_hint_directive("figure");
+        let hints = parse_init_directive("figure");
         assert!(hints.is_empty());
     }
 
     #[test]
     fn hint_directive_only_selector_parts() {
-        let hints = parse_hint_directive("figure.wide");
+        let hints = parse_init_directive("figure.wide");
         assert!(hints.is_empty());
     }
 
     #[test]
     fn hint_directive_with_attr_selector() {
-        let hints = parse_hint_directive("code-block[lang=\"rust\"], theme=dark");
+        let hints = parse_init_directive("code-block[lang=\"rust\"], theme=dark");
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "theme");
     }
@@ -1106,34 +1393,40 @@ mod tests {
     fn series_full_basic() {
         let result = parse_series_directive_full("fig");
         assert!(result.is_some());
-        let (decl, hints) = result.unwrap();
-        let Declaration::Series { id, config } = decl;
-        assert_eq!(id, "fig");
-        assert_eq!(config.formats, vec!["1"]);
-        assert!(config.parent.is_none());
-        assert!(!config.cycle);
-        assert!(hints.is_empty());
+        let (decl, inits, _on_directives) = result.unwrap();
+        if let Declaration::Series { id, config } = decl {
+            assert_eq!(id, "fig");
+            assert_eq!(config.formats, vec!["1"]);
+            assert!(config.parent.is_none());
+            assert!(!config.cycle);
+        } else {
+            panic!("expected Series");
+        }
+        assert!(inits.is_empty());
     }
 
     #[test]
     fn series_full_with_counts() {
         let result = parse_series_directive_full("fig, counts=figure");
         assert!(result.is_some());
-        let (_, hints) = result.unwrap();
-        assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].property, "series");
+        let (_, inits, _) = result.unwrap();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].property, "series");
     }
 
     #[test]
     fn series_full_with_all_params() {
         let result = parse_series_directive_full("fig, parent=sec, formats=[\"I\",\"1\"], cycle=true, counts=figure");
         assert!(result.is_some());
-        let (decl, hints) = result.unwrap();
-        let Declaration::Series { config, .. } = decl;
-        assert_eq!(config.parent.as_deref(), Some("sec"));
-        assert_eq!(config.formats, vec!["I", "1"]);
-        assert!(config.cycle);
-        assert_eq!(hints.len(), 1);
+        let (decl, inits, _) = result.unwrap();
+        if let Declaration::Series { config, .. } = decl {
+            assert_eq!(config.parent.as_deref(), Some("sec"));
+            assert_eq!(config.formats, vec!["I", "1"]);
+            assert!(config.cycle);
+        } else {
+            panic!("expected Series");
+        }
+        assert_eq!(inits.len(), 1);
     }
 
     #[test]
@@ -1149,7 +1442,7 @@ mod tests {
         let mut attrs = Attrs::default();
         apply_directive(&mut attrs, "unknown_cmd", "arg1, arg2");
         assert!(attrs.declarations.is_empty());
-        assert!(attrs.hints.is_empty());
+        assert!(attrs.inits.is_empty());
     }
 
 
@@ -1167,12 +1460,12 @@ mod tests {
 
 
 
-    // ── parse_hint_directive edge cases ──
+    // ── parse_init_directive edge cases ──
 
     #[test]
-    fn parse_hint_directive_no_properties() {
+    fn parse_init_directive_no_properties() {
         // Just a selector with no property assignments
-        let result = parse_hint_directive("figure");
+        let result = parse_init_directive("figure");
         assert!(result.is_empty());
     }
 
@@ -1181,12 +1474,56 @@ mod tests {
         let mut attrs = Attrs::default();
         apply_directive(&mut attrs, "series", "tbl, counts=table, formats=[\"I\",\"a\"]");
         assert!(!attrs.declarations.is_empty());
-        assert!(!attrs.hints.is_empty());
+        assert!(!attrs.inits.is_empty());
         // Check that the series hint was generated for table selector
-        let has_series_hint = attrs.hints.iter().any(|h| h.property == "series");
+        let has_series_hint = attrs.inits.iter().any(|h| h.property == "series");
         assert!(has_series_hint, "should have series hint from counts=");
     }
 
     // ── is_property_token edge cases ──
+
+    // ── parse_prelude tests ──
+
+    #[test]
+    fn parse_prelude_basic() {
+        let text = r#"
+@series(fig, counts=figure)
+@init(figure, label="Figure {n}")
+"#;
+        let (decls, inits) = parse_prelude(text);
+        assert!(!decls.is_empty(), "should produce declarations");
+        assert!(!inits.is_empty(), "should produce inits");
+        // series produces a Declaration::Series + OnDirective(s)
+        let has_series = decls.iter().any(|d| matches!(d, Declaration::Series { .. }));
+        assert!(has_series, "should have a series declaration");
+        // init produces an Init with label property
+        let has_label = inits.iter().any(|i| i.property == "label");
+        assert!(has_label, "should have label init");
+    }
+
+    #[test]
+    fn parse_prelude_comments_and_blanks() {
+        let text = "# this is a comment\n\n@init(heading, numbering=true)\n\n# another comment\n";
+        let (decls, inits) = parse_prelude(text);
+        assert!(decls.is_empty());
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0].property, "numbering");
+    }
+
+    #[test]
+    fn parse_prelude_without_at_prefix() {
+        // Lines without @ prefix should also work
+        let text = "series(fig, counts=figure)\ninit(figure, label=\"Fig {n}\")\n";
+        let (decls, inits) = parse_prelude(text);
+        assert!(!decls.is_empty());
+        assert!(!inits.is_empty());
+    }
+
+    #[test]
+    fn parse_prelude_empty() {
+        let (decls, inits) = parse_prelude("");
+        assert!(decls.is_empty());
+        assert!(inits.is_empty());
+    }
 
 }

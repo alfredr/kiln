@@ -1,0 +1,10 @@
+# Standard numbering definitions
+#
+# Defines series for sections and figures with cross-reference labels.
+# Documents opt in to visible numbering with @content(heading, "{number}. ")
+# or by adding numbering=true to individual elements.
+
+@series(sec, counts=heading, formats=["I","1"])
+@series(fig, counts=figure, parent=sec)
+@init(figure, label="Figure {n}")
+@init(heading, label="Section {n}")
