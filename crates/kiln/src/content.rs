@@ -63,7 +63,8 @@ impl ContentTree {
             let db = b.meta.date.as_deref().unwrap_or("");
             db.cmp(da)
         });
-        pages.sort_by(|a, b| a.path.cmp(&b.path));
+        // pages are already in tree order from collect_flat (pre-order traversal),
+        // which respects the filesystem sort_key ordering (numeric prefixes, etc.)
         Self { root, posts, pages }
     }
 }

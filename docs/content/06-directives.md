@@ -218,25 +218,9 @@ This sets `loading="lazy"` on every figure and `theme="monokai"` on Rust code bl
 
 ## Prelude
 
-kiln ships a built-in prelude that defines hierarchical section numbering and flat figure numbering using `@def`/`@use`. The prelude is automatically loaded for every document:
+kiln ships a built-in prelude that defines hierarchical section numbering and flat figure numbering. The prelude is automatically loaded for every document. It contains the `@def(numbering)` block shown [above](#def--use), plus two `@init` lines that set default cross-reference labels:
 
 ```
-@def(numbering) {
-  @var(fig, 0);
-  @var(index, [0], format=["I","1"]);
-  @var(val, 0);
-
-  @on(enter, section > section) {
-    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
-  }
-  @on(exit, section > section) { @pop(index); }
-  @on(enter, heading) {
-    @pop(index, val); @store(number, index); @push(index, val);
-  }
-  @on(enter, figure) { @inc(fig); @store(number, fig); }
-}
-
-@use(numbering);
 @init(figure, label="Figure {n}");
 @init(heading, label="Section {n}");
 ```
@@ -253,22 +237,16 @@ This means you can use `@fig:name` and `@sec:name` cross-references out of the b
 
 ### `.kiln` File Format
 
-The prelude is a `.kiln` file with `@def`/`@use` blocks, inline directives, and `#` for comments:
+The prelude is a `.kiln` file with `@def`/`@use` blocks, inline directives, and `#` for comments. A custom prelude has the same structure as the built-in one but can change format tokens and labels:
 
 ```
-# My custom prelude
+# My custom prelude — same numbering structure,
+# but with "1, a" format levels and short labels
 @def(numbering) {
   @var(fig, 0);
   @var(index, [0], format=["1","a"]);
   @var(val, 0);
-  @on(enter, section > section) {
-    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
-  }
-  @on(exit, section > section) { @pop(index); }
-  @on(enter, heading) {
-    @pop(index, val); @store(number, index); @push(index, val);
-  }
-  @on(enter, figure) { @inc(fig); @store(number, fig); }
+  # ... same @on rules as the built-in prelude ...
 }
 @use(numbering);
 @init(figure, label="Fig. {n}");
