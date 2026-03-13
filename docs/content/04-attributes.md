@@ -4,7 +4,7 @@ title: "Brace Attributes"
 
 Attach metadata to elements using brace-delimited attribute lists: `{#id .class key="value"}`. Attributes can include an ID, one or more classes, and arbitrary key-value pairs.
 
-## Supported Attribute Types
+## Supported Attribute Types {#sec:types}
 
 | Syntax | Meaning |
 | --- | --- |
@@ -13,7 +13,7 @@ Attach metadata to elements using brace-delimited attribute lists: `{#id .class 
 | `key="value"` | Sets an arbitrary attribute (quoted value) |
 | `key=value` | Sets an arbitrary attribute (unquoted value, no spaces allowed) |
 
-## On Headings
+## On Headings {#sec:on-headings}
 
 Place the attribute block at the end of the heading line:
 
@@ -23,7 +23,7 @@ Place the attribute block at the end of the heading line:
 
 This renders with the specified ID and class on the heading element. Use this to create stable anchor targets or to apply specific styles to individual headings.
 
-## On Code Blocks
+## On Code Blocks {#sec:on-code-blocks}
 
 Place the language and attributes together inside braces on the opening fence:
 
@@ -43,7 +43,7 @@ The first bare word inside the braces is the language (for syntax highlighting).
 
 A bare language without braces (`` ```rust ``) also works and is normalized to `{rust}` internally.
 
-## On Paragraphs
+## On Paragraphs {#sec:on-paragraphs}
 
 Append the attribute block to the end of a paragraph:
 
@@ -53,7 +53,7 @@ This paragraph has special styling. {.callout}
 
 The attributes are attached to the `<p>` element in the output.
 
-## Multiple Classes and Mixed Attributes
+## Multiple Classes and Mixed Attributes {#sec:multiple}
 
 You can combine multiple IDs, classes, and key-value pairs in a single attribute block:
 

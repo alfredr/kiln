@@ -314,7 +314,15 @@ pub(super) fn find_matching_delim(
     close: char,
 ) -> Option<usize> {
     let mut depth = 0i32;
+    let mut in_quotes = false;
     for (i, &ch) in chars[start..].iter().enumerate() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if in_quotes {
+            continue;
+        }
         if ch == open {
             depth += 1;
         } else if ch == close {

@@ -4,7 +4,7 @@ title: "Getting Started"
 
 This guide walks you through installing kiln, creating your first site, building it, and previewing it locally.
 
-## Installation
+## Installation {#sec:install}
 
 Kiln is not yet published to crates.io, so you need to build it from source. Make sure you have a working [Rust toolchain](https://rustup.rs/) installed, then run:
 
@@ -18,7 +18,7 @@ This compiles kiln and places the binary in your Cargo bin directory (typically 
 kiln --help
 ```
 
-## Create a Site
+## Create a Site {#sec:create}
 
 Scaffold a new site with `kiln init`:
 
@@ -55,7 +55,7 @@ my-site/
 
 **`content/`** is where all your content lives — both posts and pages. Entries with a `date` in their frontmatter are posts; entries without are pages.
 
-## Build
+## Build {#sec:build}
 
 To build your site, run:
 
@@ -71,7 +71,7 @@ The output structure mirrors your content:
 - Pages are written to `dist/<slug>/index.html`
 - Static files are copied to `dist/` preserving their directory structure
 
-## Dev Server
+## Dev Server {#sec:dev-server}
 
 During development, use the built-in dev server instead of rebuilding manually:
 

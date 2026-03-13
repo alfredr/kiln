@@ -4,7 +4,7 @@ title: "Content"
 
 Kiln organizes your writing into two kinds of content: **posts** and **pages**. Both live in a single `content/` directory, which is scanned recursively. The distinction is simple: if a piece of content has a `date` in its frontmatter, it's a post. If it doesn't, it's a page.
 
-## Layouts
+## Layouts {#sec:layouts}
 
 Every content entry can use one of two layouts.
 
@@ -24,7 +24,7 @@ content/my-post.md
 
 The filename (without the `.md` extension) becomes the slug. This is the simpler option for content that has no accompanying assets.
 
-## Nested Content
+## Nested Content {#sec:nested}
 
 Content directories can be nested to any depth. Subdirectories create a hierarchy — useful for documentation, book-style chapters, or any grouped content.
 
@@ -54,7 +54,7 @@ Every content entry has two identifiers:
 
 For top-level entries, `path` equals `slug`. For nested entries, `path` includes the parent path segments joined with `/`.
 
-## Frontmatter
+## Frontmatter {#sec:frontmatter}
 
 Every content file starts with an optional YAML frontmatter block delimited by `---` lines.
 
@@ -101,7 +101,7 @@ A section's `index.md` can include special frontmatter keys that configure how i
 | --- | --- | --- |
 | `section_slug_pattern` | string | Override `slug_pattern` for this section's children. |
 
-## Posts vs. Pages
+## Posts vs. Pages {#sec:posts-vs-pages}
 
 The only difference between a post and a page is whether the frontmatter contains a `date` field:
 
@@ -110,7 +110,7 @@ The only difference between a post and a page is whether the frontmatter contain
 
 Both can exist at any level in the content hierarchy.
 
-## Ordering
+## Ordering {#sec:ordering}
 
 **Posts** are sorted by date, newest first.
 
@@ -124,7 +124,7 @@ content/03-markdown.md
 
 With `slug_pattern = "^\\d+-(.+)$"` in `kiln.toml`, the output paths become `/getting-started/`, `/content/`, `/markdown/` while the filesystem ordering is preserved.
 
-## Slugs and Paths
+## Slugs and Paths {#sec:slugs}
 
 | Source path | Slug | Path |
 | --- | --- | --- |
@@ -133,7 +133,7 @@ With `slug_pattern = "^\\d+-(.+)$"` in `kiln.toml`, the output paths become `/ge
 | `content/guides/setup/index.md` | `setup` | `guides/setup` |
 | `content/guides/setup.md` | `setup` | `guides/setup` |
 
-## Output Paths
+## Output Paths {#sec:output}
 
 Kiln writes each piece of content to an `index.html` file inside a directory named after the path:
 
@@ -145,7 +145,7 @@ Kiln writes each piece of content to an `index.html` file inside a directory nam
 
 This produces clean URLs: `/guides/setup/` rather than `/guides/setup.html`.
 
-## Co-located Assets
+## Co-located Assets {#sec:assets}
 
 When you use the directory layout, every file in the directory besides `index.md` is treated as a co-located asset. These files are copied into the output directory next to the rendered HTML. Child content directories are **not** copied as assets — only non-content files are.
 
@@ -173,7 +173,7 @@ You can reference co-located assets with relative paths in your markdown:
 ![Architecture diagram](diagram.png)
 ```
 
-## Drafts
+## Drafts {#sec:drafts}
 
 Mark content as a draft by setting `draft: true` in its frontmatter:
 

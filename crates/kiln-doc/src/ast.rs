@@ -1,7 +1,26 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+/// Write items separated by `sep` (e.g. `", "`, `" & "`).
+fn write_separated(f: &mut fmt::Formatter<'_>, items: &[impl fmt::Display], sep: &str) -> fmt::Result {
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 { write!(f, "{sep}")?; }
+        write!(f, "{item}")?;
+    }
+    Ok(())
+}
+
+fn write_map(f: &mut fmt::Formatter<'_>, m: &HashMap<String, Value>) -> fmt::Result {
+    write!(f, "{{")?;
+    for (i, (k, v)) in m.iter().enumerate() {
+        if i > 0 { write!(f, ", ")?; }
+        write!(f, "{k}: {v}")?;
+    }
+    write!(f, "}}")
+}
 
 // ── Id generation ──
 
@@ -20,7 +39,7 @@ pub fn reset_id_counter() {
 // ── Core ──
 
 /// A parsed document with metadata and a content tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Document {
     pub meta: Metadata,
     pub content: Node, // root: Section { level: 0 }
@@ -31,7 +50,7 @@ pub struct Document {
 /// Container kinds (Section, Paragraph, Emphasis, etc.) hold child nodes.
 /// Leaf kinds (Text, Code, CodeBlock, RawBlock, Math) carry their content
 /// inline on the NodeKind variant — there is no separate `body` field.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Node {
     pub kind: NodeKind,
     pub attrs: Attrs,
@@ -41,7 +60,7 @@ pub struct Node {
 // ── Node kinds ──
 
 /// The type of a document node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum NodeKind {
     // Structure
     Section {
@@ -120,7 +139,7 @@ pub enum NodeKind {
 // ── Attributes ──
 
 /// Attributes attached to every node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Attrs {
     /// Always present — explicit (`{#fig:arch}`) or auto-generated.
     pub id: String,
@@ -169,17 +188,17 @@ impl Default for Attrs {
 /// {@init(figure, series="figs")}
 /// {@init(heading, font_family="Georgia")}
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Init {
     pub selector: Selector,
     pub property: String,
-    pub value: Value,
+    pub value: Bind<Value>,
 }
 
 // ── Selector types ──
 
 /// Top-level selector for a hint.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Selector {
     /// This node only (scoped to attachment point).
     This,
@@ -188,7 +207,7 @@ pub enum Selector {
 }
 
 /// A selector expression supporting boolean combinations and combinators.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SelectorExpr {
     /// A single compound selector: `figure.wide[lang="rust"]`
     Simple(CompoundSelector),
@@ -205,7 +224,7 @@ pub enum SelectorExpr {
 }
 
 /// Relationship between two selectors in a combinator chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CombinatorOp {
     /// `>` — direct child.
     Child,
@@ -226,7 +245,7 @@ impl CombinatorOp {
 /// A compound selector: all parts must match simultaneously (AND).
 ///
 /// `heading.numbered[level=2]` → kind=Heading, classes=["numbered"], attrs=[level=2]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CompoundSelector {
     /// Kind name in canonical PascalCase (e.g. "Heading", "CodeBlock").
     pub kind: Option<String>,
@@ -241,7 +260,7 @@ pub struct CompoundSelector {
 /// Attribute-level expression tree for `[...]` contents.
 ///
 /// `[lang="rust", preview | level=2]` → `Or(And(Pred, Pred), Pred)`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum AttrExpr {
     /// A single predicate: `[lang="rust"]` or `[preview]`.
     Pred(AttrPred),
@@ -252,14 +271,14 @@ pub enum AttrExpr {
 }
 
 /// A single attribute predicate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AttrPred {
     pub name: String,
     pub op: AttrOp,
 }
 
 /// How an attribute predicate matches.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum AttrOp {
     /// `[attr]` — attribute exists (any value).
     Exists,
@@ -269,41 +288,234 @@ pub enum AttrOp {
     StartsWith(String),
 }
 
+// ── Display impls for trace readability ──
+
+impl fmt::Display for Selector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Selector::This => f.write_str("this"),
+            Selector::Expr(expr) => fmt::Display::fmt(expr, f),
+        }
+    }
+}
+
+impl fmt::Display for SelectorExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SelectorExpr::Simple(cs) => write!(f, "{cs}"),
+            SelectorExpr::Combinator { left, op, right } => {
+                let op_str = match op {
+                    CombinatorOp::Child => ">",
+                    CombinatorOp::Descendant => "~>",
+                };
+                write!(f, "{left} {op_str} {right}")
+            }
+            SelectorExpr::Or(parts) => write_separated(f, parts, ", "),
+            SelectorExpr::And(parts) => write_separated(f, parts, " & "),
+        }
+    }
+}
+
+impl fmt::Display for CompoundSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(k) = &self.kind {
+            write!(f, "{k}")?;
+        }
+        if let Some(id) = &self.id {
+            write!(f, "#{id}")?;
+        }
+        for cls in &self.classes {
+            write!(f, ".{cls}")?;
+        }
+        if let Some(attr) = &self.attr_expr {
+            write!(f, "[{attr}]")?;
+        }
+        // If nothing was written, it's the universal selector
+        if self.kind.is_none() && self.id.is_none() && self.classes.is_empty() && self.attr_expr.is_none() {
+            write!(f, "*")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for AttrExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AttrExpr::Pred(p) => write!(f, "{p}"),
+            AttrExpr::And(parts) => write_separated(f, parts, ", "),
+            AttrExpr::Or(parts) => write_separated(f, parts, " | "),
+        }
+    }
+}
+
+impl fmt::Display for AttrPred {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.name, self.op)
+    }
+}
+
+impl fmt::Display for AttrOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AttrOp::Exists => Ok(()),
+            AttrOp::Eq(v) => write!(f, "=\"{v}\""),
+            AttrOp::StartsWith(v) => write!(f, "^=\"{v}\""),
+        }
+    }
+}
+
+fn fmt_action_1(f: &mut fmt::Formatter<'_>, name: &str, arg: &impl fmt::Display) -> fmt::Result {
+    write!(f, "@{name}({arg})")
+}
+
+fn fmt_action_2(
+    f: &mut fmt::Formatter<'_>,
+    name: &str,
+    a: &impl fmt::Display,
+    b: &impl fmt::Display,
+) -> fmt::Result {
+    write!(f, "@{name}({a}, {b})")
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Increment { var } => fmt_action_1(f, "inc", var),
+            Action::Decrement { var } => fmt_action_1(f, "dec", var),
+            Action::Pop { list, into: Some(v) } => fmt_action_2(f, "pop", list, v),
+            Action::Pop { list, into: None } => fmt_action_1(f, "pop", list),
+            Action::Push { list, value } => fmt_action_2(f, "push", list, value),
+            Action::Reset { var, to } => fmt_action_2(f, "reset", var, to),
+            Action::StoreFormatted { var, property, .. } => fmt_action_2(f, "store", property, var),
+            Action::SetProperty { property, value } => fmt_action_2(f, "set", property, value),
+            Action::Prepend { template } => fmt_action_1(f, "prepend", template),
+            Action::Append { template } => fmt_action_1(f, "append", template),
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Number(n) if *n == (*n as i64) as f64 => write!(f, "{}", *n as i64),
+            Value::Number(n) => fmt::Display::fmt(n, f),
+            Value::Text(s) => write!(f, "\"{s}\""),
+            Value::Bool(b) => fmt::Display::fmt(b, f),
+            Value::Length(l) => fmt::Display::fmt(l, f),
+            Value::Spacing(s) => fmt::Display::fmt(s, f),
+            Value::List(items) => {
+                f.write_str("[")?;
+                write_separated(f, items, ", ")?;
+                f.write_str("]")
+            }
+            Value::Map(m) => write_map(f, m),
+        }
+    }
+}
+
+impl fmt::Display for Length {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let unit = match self.unit {
+            LengthUnit::Em => "em",
+            LengthUnit::Rem => "rem",
+            LengthUnit::Px => "px",
+            LengthUnit::Pt => "pt",
+            LengthUnit::Cm => "cm",
+            LengthUnit::Mm => "mm",
+            LengthUnit::Percent => "%",
+        };
+        write!(f, "{}{unit}", self.value)
+    }
+}
+
+impl fmt::Display for Spacing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Spacing::Fixed(l) => fmt::Display::fmt(l, f),
+            Spacing::Flex { grow } => write!(f, "flex({grow})"),
+            Spacing::Auto => f.write_str("auto"),
+        }
+    }
+}
+
+impl<T: fmt::Display> fmt::Display for Bind<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Bind::Val(v) => fmt::Display::fmt(v, f),
+            Bind::Arg(name) => write!(f, "@arg({name})"),
+        }
+    }
+}
+
+// ── Bindings ──
+
+/// A value that is either resolved or a deferred reference to a `@def` parameter.
+///
+/// Inside a `@def` body, `@arg(name)` produces `Bind::Arg(name)`.
+/// When `@use` expands the def, all `Arg` variants are resolved to `Val`.
+#[derive(Debug, Clone, Serialize)]
+pub enum Bind<T> {
+    /// A concrete, resolved value.
+    Val(T),
+    /// A deferred reference to a `@def` parameter, resolved at `@use` time.
+    Arg(String),
+}
+
+impl<T> Bind<T> {
+    /// Unwrap the resolved value, panicking if still an unresolved parameter.
+    pub fn val(&self) -> &T {
+        match self {
+            Bind::Val(v) => v,
+            Bind::Arg(name) => panic!("unresolved @arg({name})"),
+        }
+    }
+}
+
 // ── Declarations ──
 
 /// A named resource declared in a scope.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Declaration {
     /// A running-state variable initialization.
     VarDecl(VarDecl),
     /// A selector-triggered action rule.
     OnDirective(OnDirective),
-    /// A named group of declarations (like a function definition).
-    Def { name: String, body: Vec<Declaration>, inits: Vec<Init> },
-    /// Inline a previously defined group by name.
-    Use { name: String },
+    /// A named, optionally parameterized group of declarations.
+    Def {
+        name: String,
+        params: Vec<(String, String)>,
+        body: Vec<Declaration>,
+        inits: Vec<Init>,
+    },
+    /// Expand a previously defined group, with optional parameter overrides.
+    Use {
+        name: String,
+        overrides: Vec<(String, String)>,
+    },
 }
 
 /// A variable initialization: name + initial value + optional format tokens.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VarDecl {
     pub name: String,
-    pub value: Value,
-    pub formats: Vec<String>,
+    pub value: Bind<Value>,
+    pub formats: Bind<Vec<String>>,
     pub cycle: bool,
 }
 
-/// When a trigger fires relative to the node's children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// When a trigger fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Event {
-    /// Fire on visit, before children (default).
+    /// Fire on visit, before children (default for tree walk).
     Enter,
     /// Fire after children have been processed.
     Exit,
+    /// Fire on user click (interactive/browser mode).
+    Click,
 }
 
 /// A selector-triggered action rule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OnDirective {
     pub event: Event,
     pub selector: Selector,
@@ -311,7 +523,7 @@ pub struct OnDirective {
 }
 
 /// An action to execute when a trigger fires.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Action {
     /// Increment a numeric variable by 1.
     Increment { var: String },
@@ -322,7 +534,7 @@ pub enum Action {
     /// Push a value onto the end of a list variable.
     Push { list: String, value: PushValue },
     /// Reset a variable to its initial value.
-    Reset { var: String, to: Value },
+    Reset { var: String, to: Bind<Value> },
     /// Format a running-state variable and store as a node property.
     StoreFormatted {
         var: String,
@@ -331,15 +543,15 @@ pub enum Action {
         cycle: bool,
     },
     /// Set a node property to a literal value.
-    SetProperty { property: String, value: Value },
+    SetProperty { property: String, value: Bind<Value> },
     /// Insert a text node before existing children.
-    Prepend { template: String },
+    Prepend { template: Bind<String> },
     /// Insert a text node after existing children.
-    Append { template: String },
+    Append { template: Bind<String> },
 }
 
 /// What to push onto a list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum PushValue {
     /// Push the current value of a named variable.
     Var(String),
@@ -347,8 +559,17 @@ pub enum PushValue {
     Literal(Value),
 }
 
+impl fmt::Display for PushValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PushValue::Var(v) => f.write_str(v),
+            PushValue::Literal(v) => fmt::Display::fmt(v, f),
+        }
+    }
+}
+
 /// Number formatting style for a single counter level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NumberFormat {
     Arabic,
     RomanUpper,
@@ -358,7 +579,7 @@ pub enum NumberFormat {
 }
 
 /// A parsed format token: style with optional prefix/suffix wrapping.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FormatToken {
     pub prefix: String,
     pub format: NumberFormat,
@@ -447,7 +668,7 @@ fn to_alpha(n: u32, upper: bool) -> String {
 // ── Typed values ──
 
 /// A typed value for properties, hints, and resolved attributes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Value {
     Text(String),
     Number(f64),
@@ -459,14 +680,14 @@ pub enum Value {
 }
 
 /// A length with a unit.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Length {
     pub value: f64,
     pub unit: LengthUnit,
 }
 
 /// Length units.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum LengthUnit {
     Em,
     Rem,
@@ -478,7 +699,7 @@ pub enum LengthUnit {
 }
 
 /// Spacing values for layout hints.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Spacing {
     Fixed(Length),
     Flex { grow: f64 },

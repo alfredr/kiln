@@ -225,35 +225,69 @@ pub fn matches_selector(selector: &Selector, node: &Node, ancestors: &[NodeSnaps
 fn matches_expr(expr: &SelectorExpr, node: &Node, ancestors: &[NodeSnapshot]) -> bool {
     match expr {
         SelectorExpr::Simple(compound) => matches_compound(compound, node),
-        SelectorExpr::Combinator { left, op, right } => {
-            matches_expr(right, node, ancestors) && matches_combinator_left(left, op, ancestors)
+        SelectorExpr::Combinator { .. } => {
+            let (rightmost, segments) = flatten_combinator_chain(expr);
+            matches_expr(rightmost, node, ancestors)
+                && match_ancestor_chain(&segments, ancestors)
         }
         SelectorExpr::Or(exprs) => exprs.iter().any(|e| matches_expr(e, node, ancestors)),
         SelectorExpr::And(exprs) => exprs.iter().all(|e| matches_expr(e, node, ancestors)),
     }
 }
 
-fn matches_combinator_left(
-    left: &SelectorExpr,
-    op: &CombinatorOp,
-    ancestors: &[NodeSnapshot],
-) -> bool {
-    match op {
-        CombinatorOp::Child => ancestors
-            .last()
-            .is_some_and(|parent| matches_expr_snapshot(left, parent)),
-        CombinatorOp::Descendant => ancestors.iter().any(|a| matches_expr_snapshot(left, a)),
+/// Flatten a right-recursive combinator chain into a list of (left-expr, op) segments
+/// plus the rightmost (key) expression that matches the current node.
+fn flatten_combinator_chain(
+    expr: &SelectorExpr,
+) -> (&SelectorExpr, Vec<(&SelectorExpr, &CombinatorOp)>) {
+    let mut segments = Vec::new();
+    let mut current = expr;
+    loop {
+        match current {
+            SelectorExpr::Combinator { left, op, right } => {
+                segments.push((left.as_ref(), op));
+                current = right.as_ref();
+            }
+            other => return (other, segments),
+        }
     }
 }
 
-/// Match an expression against a snapshot (for ancestor matching).
-/// Combinators in ancestor context are not supported (would need deeper ancestor chain).
-fn matches_expr_snapshot(expr: &SelectorExpr, snap: &NodeSnapshot) -> bool {
+/// Walk a flattened combinator chain against the ancestor list.
+///
+/// `segments` is left-to-right; we consume from the right end (closest to node).
+/// `ancestors` is root-first; we consume from the right end (immediate parent).
+///
+/// `>` (child) is deterministic — must match the immediate parent.
+/// `~>` (descendant) tries each candidate from nearest to farthest, backtracking
+/// if a later segment fails.
+fn match_ancestor_chain(
+    segments: &[(&SelectorExpr, &CombinatorOp)],
+    ancestors: &[NodeSnapshot],
+) -> bool {
+    let Some(((sel, op), rest)) = segments.split_last() else {
+        return true;
+    };
+    match op {
+        CombinatorOp::Child => {
+            let ok = ancestors
+                .last()
+                .is_some_and(|parent| matches_snapshot(sel, parent));
+            ok && match_ancestor_chain(rest, &ancestors[..ancestors.len() - 1])
+        }
+        CombinatorOp::Descendant => (0..ancestors.len()).rev().any(|i| {
+            matches_snapshot(sel, &ancestors[i]) && match_ancestor_chain(rest, &ancestors[..i])
+        }),
+    }
+}
+
+/// Match a (non-combinator) selector expression against a snapshot.
+fn matches_snapshot(expr: &SelectorExpr, snap: &NodeSnapshot) -> bool {
     match expr {
         SelectorExpr::Simple(compound) => matches_compound_snapshot(compound, snap),
-        SelectorExpr::Or(exprs) => exprs.iter().any(|e| matches_expr_snapshot(e, snap)),
-        SelectorExpr::And(exprs) => exprs.iter().all(|e| matches_expr_snapshot(e, snap)),
-        SelectorExpr::Combinator { .. } => false, // not supported in ancestor context
+        SelectorExpr::Or(exprs) => exprs.iter().any(|e| matches_snapshot(e, snap)),
+        SelectorExpr::And(exprs) => exprs.iter().all(|e| matches_snapshot(e, snap)),
+        SelectorExpr::Combinator { .. } => false,
     }
 }
 
@@ -1282,14 +1316,14 @@ mod tests {
             std::slice::from_ref(&parent)
         ));
 
-        // Combinator in ancestor context returns false
+        // Multi-level combinator: section ~> figure > caption
+        let section = make_snapshot(NodeKind::Section { level: 1 });
         let sel2 = parse_selector("section ~> figure > caption").unwrap();
-        // This tests multi-level combinator (nested combinator in snapshot = false)
-        assert!(!matches_selector(
-            &sel2,
-            &child,
-            std::slice::from_ref(&parent)
-        ));
+        assert!(matches_selector(&sel2, &child, &[section.clone(), parent.clone()]));
+
+        // Fails when intermediate ancestor is wrong
+        let para = make_snapshot(NodeKind::Paragraph);
+        assert!(!matches_selector(&sel2, &child, &[para]));
     }
 
     #[test]
@@ -1465,6 +1499,72 @@ mod tests {
             }),
             "FileScope"
         );
+    }
+
+    #[test]
+    fn multi_level_child_combinator_requires_depth() {
+        let heading = make_node(NodeKind::Heading { level: 3 });
+        let sec1 = make_snapshot(NodeKind::Section { level: 1 });
+        let sec2 = make_snapshot(NodeKind::Section { level: 2 });
+        let sec3 = make_snapshot(NodeKind::Section { level: 3 });
+
+        // sec > h matches heading with one section parent
+        let sel1 = parse_selector("sec > h").unwrap();
+        assert!(matches_selector(&sel1, &heading, &[sec1.clone()]));
+
+        // sec > sec > h requires two nested sections
+        let sel2 = parse_selector("sec > sec > h").unwrap();
+        assert!(!matches_selector(&sel2, &heading, &[sec1.clone()]));
+        assert!(matches_selector(&sel2, &heading, &[sec1.clone(), sec2.clone()]));
+
+        // sec > sec > sec > h requires three nested sections
+        let sel3 = parse_selector("sec > sec > sec > h").unwrap();
+        assert!(!matches_selector(&sel3, &heading, &[sec1.clone(), sec2.clone()]));
+        assert!(matches_selector(
+            &sel3,
+            &heading,
+            &[sec1.clone(), sec2.clone(), sec3.clone()]
+        ));
+
+        // sec > sec > sec > sec > h requires four — fails with only three
+        let sel4 = parse_selector("sec > sec > sec > sec > h").unwrap();
+        assert!(!matches_selector(
+            &sel4,
+            &heading,
+            &[sec1.clone(), sec2.clone(), sec3.clone()]
+        ));
+    }
+
+    #[test]
+    fn multi_level_descendant_combinator() {
+        let heading = make_node(NodeKind::Heading { level: 2 });
+        let sec = make_snapshot(NodeKind::Section { level: 1 });
+        let para = make_snapshot(NodeKind::Paragraph);
+
+        // section ~> section ~> heading — needs two sections in ancestry
+        let sel = parse_selector("sec ~> sec ~> h").unwrap();
+        assert!(matches_selector(
+            &sel,
+            &heading,
+            &[sec.clone(), para.clone(), sec.clone()]
+        ));
+        // Only one section — should fail
+        assert!(!matches_selector(&sel, &heading, &[sec.clone()]));
+    }
+
+    #[test]
+    fn descendant_combinator_backtracks() {
+        // fig > sec ~> h  with ancestors [Figure, Section, Paragraph, Section]
+        // Greedy would pick the nearest Section, then fail (Paragraph is not Figure).
+        // Backtracking picks the farther Section, then Figure matches fig >.
+        let heading = make_node(NodeKind::Heading { level: 2 });
+        let fig = make_snapshot(NodeKind::Figure);
+        let sec1 = make_snapshot(NodeKind::Section { level: 1 });
+        let para = make_snapshot(NodeKind::Paragraph);
+        let sec2 = make_snapshot(NodeKind::Section { level: 2 });
+
+        let sel = parse_selector("fig > sec ~> h").unwrap();
+        assert!(matches_selector(&sel, &heading, &[fig, sec1, para, sec2]));
     }
 
     #[test]

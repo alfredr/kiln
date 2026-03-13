@@ -1,5 +1,5 @@
 use crate::ast::{
-    Action, Attrs, Declaration, Event, Init, Node, NodeKind, OnDirective, Value, VarDecl,
+    Action, Attrs, Bind, Declaration, Event, Init, Node, NodeKind, OnDirective, Value, VarDecl,
 };
 
 use super::inline::find_matching_delim;
@@ -350,11 +350,21 @@ fn parse_one_prelude_statement(chars: &[char], mut pos: usize, attrs: &mut Attrs
 fn apply_block_directive(attrs: &mut Attrs, cmd: &str, args: &str, body: &str) {
     match cmd {
         "def" => {
-            let name = args.trim().to_string();
+            let parts = split_directive_args(args);
+            if parts.is_empty() {
+                return;
+            }
+            let name = parts[0].0.clone();
+            let params: Vec<(String, String)> = parts[1..]
+                .iter()
+                .filter(|(k, _)| !k.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let mut inner = Attrs::default();
             parse_prelude_statements(body, &mut inner);
             attrs.declarations.push(Declaration::Def {
                 name,
+                params,
                 body: inner.declarations,
                 inits: inner.inits,
             });
@@ -380,6 +390,7 @@ fn parse_on_block_directive(args: &str, body: &str) -> Option<OnDirective> {
     let (event, selector_parts) = match parts[0].trim() {
         "enter" => (Event::Enter, &parts[1..]),
         "exit" => (Event::Exit, &parts[1..]),
+        "click" => (Event::Click, &parts[1..]),
         _ => (Event::Enter, &parts[..]),
     };
 
@@ -434,9 +445,18 @@ fn apply_directive(attrs: &mut Attrs, cmd: &str, args: &str) {
             }
         }
         "use" => {
-            let name = args.trim().to_string();
+            let parts = split_directive_args(args);
+            if parts.is_empty() {
+                return;
+            }
+            let name = parts[0].0.clone();
+            let overrides: Vec<(String, String)> = parts[1..]
+                .iter()
+                .filter(|(k, _)| !k.is_empty())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             if !name.is_empty() {
-                attrs.declarations.push(Declaration::Use { name });
+                attrs.declarations.push(Declaration::Use { name, overrides });
             }
         }
         _ => {}
@@ -455,17 +475,17 @@ fn parse_var_directive(args: &str) -> Option<VarDecl> {
 
     // Parse initial value (second positional arg)
     let value = if parts.len() > 1 {
-        parse_initial_value(&parts[1].1)
+        parse_or_defer(&parts[1].1, parse_initial_value)
     } else {
-        Value::Number(0.0)
+        Bind::Val(Value::Number(0.0))
     };
 
-    let mut formats = Vec::new();
+    let mut formats = Bind::Val(Vec::new());
     let mut cycle = false;
 
     for (key, val) in &parts[2..] {
         match key.as_str() {
-            "format" | "formats" => formats = parse_format_list(val),
+            "format" | "formats" => formats = parse_or_defer(val, parse_format_list),
             "cycle" => cycle = val == "true",
             _ => {}
         }
@@ -480,7 +500,7 @@ fn parse_var_directive(args: &str) -> Option<VarDecl> {
 }
 
 /// Parse an initial value string: `0` → Number, `[]` → List, `[0]` → List([0]), etc.
-fn parse_initial_value(s: &str) -> Value {
+pub(crate) fn parse_initial_value(s: &str) -> Value {
     let s = s.trim();
     match s {
         "true" => Value::Bool(true),
@@ -508,9 +528,9 @@ fn parse_scalar_value(s: &str) -> Value {
 
 /// Parse `@on(enter, selector, @action1(...), ...)` or `@on(selector, @action1(...), ...)`.
 ///
-/// If the first token is `enter` or `exit`, it sets the event phase; otherwise
-/// defaults to `Enter`. Remaining non-`@` tokens form the selector; `@`-prefixed
-/// tokens are action calls.
+/// If the first token is `enter`, `exit`, or `click`, it sets the event phase;
+/// otherwise defaults to `Enter`. Remaining non-`@` tokens form the selector;
+/// `@`-prefixed tokens are action calls.
 fn parse_on_directive(args: &str) -> Option<OnDirective> {
     let parts = split_top_level_commas(args);
     if parts.is_empty() {
@@ -521,6 +541,7 @@ fn parse_on_directive(args: &str) -> Option<OnDirective> {
     let (event, rest) = match parts[0].trim() {
         "enter" => (Event::Enter, &parts[1..]),
         "exit" => (Event::Exit, &parts[1..]),
+        "click" => (Event::Click, &parts[1..]),
         _ => (Event::Enter, &parts[..]),
     };
 
@@ -590,9 +611,9 @@ fn parse_action_call(s: &str) -> Option<Action> {
             let var = parts.first()?.0.clone();
             // Reset to 0 by default; the engine will use the VarDecl's initial value
             let to = if parts.len() > 1 {
-                parse_initial_value(&parts[1].1)
+                parse_or_defer(&parts[1].1, parse_initial_value)
             } else {
-                Value::Number(0.0)
+                Bind::Val(Value::Number(0.0))
             };
             Some(Action::Reset { var, to })
         }
@@ -611,12 +632,12 @@ fn parse_action_call(s: &str) -> Option<Action> {
         "set" => {
             let parts = parse_args(args, 2)?;
             let property = parts[0].0.clone();
-            let value = parse_init_value(&parts[1].1);
+            let value = parse_or_defer(&parts[1].1, parse_init_value);
             Some(Action::SetProperty { property, value })
         }
         "prepend" | "content" | "append" => {
             // @content("template") is sugar for @prepend(@text("template"))
-            let template = parse_text_arg(args);
+            let template = parse_or_defer(&parse_text_arg(args), |s| s.to_string());
             Some(if cmd == "append" {
                 Action::Append { template }
             } else {
@@ -650,7 +671,8 @@ fn parse_content_directive(args: &str) -> Option<OnDirective> {
 
     let selector_str = parts[0].trim();
     let selector = crate::selector::parse_selector(selector_str)?;
-    let template = parts[1..].join(",").trim().trim_matches('"').to_string();
+    let raw = parts[1..].join(",").trim().trim_matches('"').to_string();
+    let template = parse_or_defer(&raw, |s| s.to_string());
 
     Some(OnDirective {
         event: Event::Enter,
@@ -661,7 +683,23 @@ fn parse_content_directive(args: &str) -> Option<OnDirective> {
 
 /// Parse a format list like `["I","1","a"]` into a `Vec<String>`.
 /// Also accepts a single bare token like `I` → `vec!["I"]`.
-fn parse_format_list(s: &str) -> Vec<String> {
+/// Check if a string is an `@arg(name)` reference, returning the parameter name.
+pub(crate) fn try_parse_arg_ref(s: &str) -> Option<String> {
+    let s = s.trim();
+    Some(s.strip_prefix("@arg(")?.strip_suffix(')')?.to_string())
+}
+
+/// Parse a value string, or return a deferred `@arg` reference.
+pub(crate) fn parse_or_defer<T>(s: &str, parse: impl Fn(&str) -> T) -> Bind<T> {
+    match try_parse_arg_ref(s) {
+        Some(param) => Bind::Arg(param),
+        None => Bind::Val(parse(s)),
+    }
+}
+
+/// Parse a format list like `["I","1","a"]` into a `Vec<String>`.
+/// Also accepts a single bare token like `I` → `vec!["I"]`.
+pub(crate) fn parse_format_list(s: &str) -> Vec<String> {
     let s = s.trim();
     if s.starts_with('[') && s.ends_with(']') {
         let inner = &s[1..s.len() - 1];
@@ -709,7 +747,7 @@ fn parse_init_directive(args: &str) -> Vec<Init> {
         if let Some(eq) = find_top_level_eq(prop) {
             let key = prop[..eq].trim().to_string();
             let val_str = prop[eq + 1..].trim();
-            let value = parse_init_value(val_str);
+            let value = parse_or_defer(val_str, parse_init_value);
             inits.push(Init {
                 selector: selector.clone(),
                 property: key,
@@ -753,7 +791,7 @@ fn is_property_token(token: &str) -> bool {
 }
 
 /// Parse an init property value string into a `Value`.
-fn parse_init_value(s: &str) -> Value {
+pub(crate) fn parse_init_value(s: &str) -> Value {
     let s = s.trim().trim_matches('"');
     match s {
         "true" => Value::Bool(true),

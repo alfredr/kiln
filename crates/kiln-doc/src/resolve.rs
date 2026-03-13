@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 use crate::ast::{
-    Action, Declaration, Document, Event, FormatToken, Init, Node, NodeKind, OnDirective,
+    Action, Bind, Declaration, Document, Event, FormatToken, Init, Node, NodeKind, OnDirective,
     PushValue, RawBlockCompiler, Selector, Value,
 };
-use crate::selector::{NodeSnapshot, matches_selector};
+use crate::selector::{NodeSnapshot, matches_selector, node_kind_name};
 use crate::visit::Pass;
 
 /// Target of a resolved label.
@@ -37,6 +39,104 @@ pub fn resolve_document(doc: &mut Document) {
     CascadeInits.run(doc);
     ExecuteProgram.run(doc);
     ResolveCrossRefs.run(doc);
+}
+
+/// Resolve a document step-by-step, returning the AST snapshot after each pass.
+///
+/// Returns `[("Parsed", ...), ("Hoist", ...), ("Cascade", ...), ("Execute", ...), ("CrossRefs", ...)]`.
+pub fn resolve_document_stepped(doc: &Document) -> Vec<(&'static str, Document)> {
+    let mut doc = doc.clone();
+    let mut stages = vec![("Parsed", doc.clone())];
+
+    HoistDirectives.run(&mut doc);
+    stages.push(("Hoist", doc.clone()));
+
+    CascadeInits.run(&mut doc);
+    stages.push(("Cascade", doc.clone()));
+
+    ExecuteProgram.run(&mut doc);
+    stages.push(("Execute", doc.clone()));
+
+    ResolveCrossRefs.run(&mut doc);
+    stages.push(("CrossRefs", doc.clone()));
+
+    stages
+}
+
+// ── Trace types ──
+
+/// A full execution trace: initial AST + all events from all passes.
+#[derive(Serialize)]
+pub struct Trace {
+    pub input: String,
+    pub initial_ast: Document,
+    pub events: Vec<TraceEvent>,
+}
+
+/// A single event in the execution trace.
+#[derive(Serialize)]
+pub enum TraceEvent {
+    PassStart { name: String },
+    PassEnd { name: String, ast: Box<Document> },
+
+    // Generic node enter/exit for all passes
+    NodeEnter { pass: String, node_id: String, kind: String, node_properties: HashMap<String, Value> },
+    NodeExit { pass: String, node_id: String, node_properties: HashMap<String, Value> },
+
+    // HoistDirectives
+    Hoist { node_id: String, decls: usize, inits: usize, node_properties: HashMap<String, Value> },
+
+    // CascadeInits
+    InitApplied { node_id: String, property: String, value: Value, source: String },
+    InitSkipped { node_id: String, property: String },
+
+    // ExecuteProgram
+    DeclareVar { name: String, value: Value },
+    RegisterTrigger { selector: String, event: String, actions: Vec<String> },
+    DefRegister { name: String, params: Vec<String> },
+    UseExpand { name: String, bindings: HashMap<String, String> },
+    TriggerMatch { node_id: String, selector: String, event: String },
+    ActionExec {
+        node_id: String,
+        action: String,
+        state_before: HashMap<String, Value>,
+        state_after: HashMap<String, Value>,
+        node_properties: HashMap<String, Value>,
+    },
+    PrependText { node_id: String, text: String },
+    AppendText { node_id: String, text: String },
+
+    // ResolveCrossRefs
+    ResolveRef { node_id: String, target: String, resolved_text: String, node_properties: HashMap<String, Value> },
+}
+
+/// Resolve a document with full tracing — returns the initial AST and all events.
+pub fn resolve_document_traced(doc: &Document, input: &str) -> Trace {
+    let initial_ast = doc.clone();
+    let mut doc = doc.clone();
+    let mut events = Vec::new();
+
+    events.push(TraceEvent::PassStart { name: "Hoist".into() });
+    hoist_traced(&mut doc.content, &mut events);
+    events.push(TraceEvent::PassEnd { name: "Hoist".into(), ast: Box::new(doc.clone()) });
+
+    events.push(TraceEvent::PassStart { name: "Cascade".into() });
+    cascade_traced(&mut doc.content, &[], &[], &mut events);
+    events.push(TraceEvent::PassEnd { name: "Cascade".into(), ast: Box::new(doc.clone()) });
+
+    events.push(TraceEvent::PassStart { name: "Execute".into() });
+    execute_program_traced(&mut doc, &mut events);
+    events.push(TraceEvent::PassEnd { name: "Execute".into(), ast: Box::new(doc.clone()) });
+
+    events.push(TraceEvent::PassStart { name: "CrossRefs".into() });
+    resolve_refs_traced(&mut doc, &mut events);
+    events.push(TraceEvent::PassEnd { name: "CrossRefs".into(), ast: Box::new(doc.clone()) });
+
+    Trace {
+        input: input.to_string(),
+        initial_ast,
+        events,
+    }
 }
 
 // ── HoistDirectives pass ──
@@ -75,6 +175,50 @@ fn hoist(node: &mut Node) {
     });
 }
 
+fn hoist_traced(node: &mut Node, events: &mut Vec<TraceEvent>) {
+    events.push(TraceEvent::NodeEnter {
+        pass: "Hoist".into(),
+        node_id: node.attrs.id.clone(),
+        kind: node_kind_name(&node.kind).to_string(),
+        node_properties: node.attrs.properties.clone(),
+    });
+
+    for child in &mut node.children {
+        hoist_traced(child, events);
+    }
+
+    let mut hoisted_inits = Vec::new();
+    let mut hoisted_decls = Vec::new();
+
+    for child in &node.children {
+        if matches!(&child.kind, NodeKind::Custom { content_type } if content_type == "directive") {
+            hoisted_inits.extend(child.attrs.inits.iter().cloned());
+            hoisted_decls.extend(child.attrs.declarations.iter().cloned());
+        }
+    }
+
+    node.attrs.inits.extend(hoisted_inits.clone());
+    node.attrs.declarations.extend(hoisted_decls.clone());
+    node.children.retain(|child| {
+        !matches!(&child.kind, NodeKind::Custom { content_type } if content_type == "directive")
+    });
+
+    if !hoisted_decls.is_empty() || !hoisted_inits.is_empty() {
+        events.push(TraceEvent::Hoist {
+            node_id: node.attrs.id.clone(),
+            decls: hoisted_decls.len(),
+            inits: hoisted_inits.len(),
+            node_properties: node.attrs.properties.clone(),
+        });
+    }
+
+    events.push(TraceEvent::NodeExit {
+        pass: "Hoist".into(),
+        node_id: node.attrs.id.clone(),
+        node_properties: node.attrs.properties.clone(),
+    });
+}
+
 // ── CascadeInits pass ──
 
 /// Walk the tree depth-first, matching ancestor inits against each node
@@ -95,7 +239,7 @@ fn cascade(node: &mut Node, ancestor_inits: &[Vec<Init>], ancestors: &[NodeSnaps
             node.attrs
                 .properties
                 .entry(init.property.clone())
-                .or_insert_with(|| init.value.clone());
+                .or_insert_with(|| init.value.val().clone());
         }
     }
 
@@ -105,7 +249,7 @@ fn cascade(node: &mut Node, ancestor_inits: &[Vec<Init>], ancestors: &[NodeSnaps
             node.attrs
                 .properties
                 .entry(init.property.clone())
-                .or_insert_with(|| init.value.clone());
+                .or_insert_with(|| init.value.val().clone());
         }
     }
 
@@ -121,6 +265,74 @@ fn cascade(node: &mut Node, ancestor_inits: &[Vec<Init>], ancestors: &[NodeSnaps
     for child in &mut node.children {
         cascade(child, &child_ancestor_inits, &child_ancestors);
     }
+}
+
+fn apply_init_traced(node: &mut Node, init: &Init, source: &str, events: &mut Vec<TraceEvent>) {
+    let prop = init.property.clone();
+    if node.attrs.properties.contains_key(&prop) {
+        events.push(TraceEvent::InitSkipped {
+            node_id: node.attrs.id.clone(),
+            property: prop,
+        });
+    } else {
+        let val = init.value.val().clone();
+        events.push(TraceEvent::InitApplied {
+            node_id: node.attrs.id.clone(),
+            property: prop.clone(),
+            value: val.clone(),
+            source: source.into(),
+        });
+        node.attrs.properties.insert(prop, val);
+    }
+}
+
+fn cascade_traced(
+    node: &mut Node,
+    ancestor_inits: &[Vec<Init>],
+    ancestors: &[NodeSnapshot],
+    events: &mut Vec<TraceEvent>,
+) {
+    let kind = node_kind_name(&node.kind).to_string();
+    events.push(TraceEvent::NodeEnter {
+        pass: "Cascade".into(),
+        node_id: node.attrs.id.clone(),
+        kind,
+        node_properties: node.attrs.properties.clone(),
+    });
+
+    // Apply own This inits to self (clone to release borrow on node).
+    let this_inits: Vec<_> = node.attrs.inits.iter()
+        .filter(|i| matches!(i.selector, Selector::This))
+        .cloned()
+        .collect();
+    for init in &this_inits {
+        apply_init_traced(node, init, "self", events);
+    }
+
+    // Match ancestor inits (nearest first via rev).
+    for init in ancestor_inits.iter().rev().flatten() {
+        if matches_selector(&init.selector, node, ancestors) {
+            apply_init_traced(node, init, "ancestor", events);
+        }
+    }
+
+    let own_inits = node.attrs.inits.clone();
+    let mut child_ancestor_inits: Vec<Vec<Init>> = ancestor_inits.to_vec();
+    child_ancestor_inits.push(own_inits);
+
+    let snap = NodeSnapshot::from_node(node);
+    let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
+    child_ancestors.push(snap);
+
+    for child in &mut node.children {
+        cascade_traced(child, &child_ancestor_inits, &child_ancestors, events);
+    }
+
+    events.push(TraceEvent::NodeExit {
+        pass: "Cascade".into(),
+        node_id: node.attrs.id.clone(),
+        node_properties: node.attrs.properties.clone(),
+    });
 }
 
 // ── ExecuteProgram pass (generic reactive walk engine) ──
@@ -141,37 +353,131 @@ struct LabelEntry {
     label_template: String,
 }
 
+/// Named definition registry carried through the walk.
+type Defs = HashMap<String, (Vec<(String, String)>, Vec<Declaration>, Vec<Init>)>;
+
+/// Persistent runtime state for the reactive walk engine.
+///
+/// In static mode, created during [`ExecuteProgram`] and consumed immediately.
+/// In interactive mode (browser/WASM), kept alive to dispatch user events.
+pub struct Runtime {
+    state: WalkState,
+    var_meta: HashMap<String, VarMeta>,
+    triggers: Vec<OnDirective>,
+    label_map: HashMap<String, LabelEntry>,
+    defs: Defs,
+}
+
+impl Runtime {
+    /// Create an empty runtime.
+    fn new() -> Self {
+        Self {
+            state: WalkState::new(),
+            var_meta: HashMap::new(),
+            triggers: Vec::new(),
+            label_map: HashMap::new(),
+            defs: HashMap::new(),
+        }
+    }
+
+    /// Phase 1: Walk the tree in document order, registering variables and
+    /// triggers, and firing Enter/Exit events. Returns `Self` with accumulated
+    /// state for further dispatching or finalization.
+    pub fn init(doc: &mut Document) -> Self {
+        if !has_program_declarations(&doc.content) {
+            return Self::new();
+        }
+        let mut rt = Self::new();
+        program_walk(&mut doc.content, &mut rt, &[]);
+        rt
+    }
+
+    /// Finalize: encode the label map into the document root and consume self.
+    /// Used by static precompilation where no further dispatching is needed.
+    pub fn finish(self, doc: &mut Document) {
+        if !self.label_map.is_empty() {
+            doc.content
+                .attrs
+                .properties
+                .insert("__label_map".to_string(), encode_label_map(&self.label_map));
+        }
+    }
+
+    /// Static mode convenience: init + finish in one step.
+    pub fn run_static(doc: &mut Document) {
+        let rt = Self::init(doc);
+        rt.finish(doc);
+    }
+
+    /// Dispatch a user event to a specific node, executing matching triggers.
+    ///
+    /// Returns the IDs of nodes whose triggers were fired (and thus may have
+    /// changed properties or state).
+    pub fn dispatch(
+        &mut self,
+        doc: &mut Document,
+        event: Event,
+        node_id: &str,
+    ) -> Vec<String> {
+        let ancestors = match build_ancestor_chain(&doc.content, node_id) {
+            Some(a) => a,
+            None => return vec![],
+        };
+        let Some(node) = find_node_mut(&mut doc.content, node_id) else {
+            return vec![];
+        };
+        let triggers = self.triggers.clone();
+        let fired = dispatch_triggers(event, &triggers, node, &ancestors, self);
+        // Re-evaluate content templates (Prepend/Append) so visible text updates
+        reapply_content(&triggers, node, &ancestors);
+        if fired { vec![node_id.to_string()] } else { vec![] }
+    }
+}
+
+/// Find a mutable reference to a node by ID.
+fn find_node_mut<'a>(node: &'a mut Node, id: &str) -> Option<&'a mut Node> {
+    if node.attrs.id == id {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_node_mut(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Build the ancestor snapshot chain for a node (root-first), excluding the node itself.
+fn build_ancestor_chain(root: &Node, target_id: &str) -> Option<Vec<NodeSnapshot>> {
+    let mut path = Vec::new();
+    if ancestor_walk(root, target_id, &mut path) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn ancestor_walk(node: &Node, target_id: &str, path: &mut Vec<NodeSnapshot>) -> bool {
+    if node.attrs.id == target_id {
+        return true;
+    }
+    path.push(NodeSnapshot::from_node(node));
+    for child in &node.children {
+        if ancestor_walk(child, target_id, path) {
+            return true;
+        }
+    }
+    path.pop();
+    false
+}
+
 /// Walk the tree in document order, executing variable inits and firing
 /// selector-triggered actions. Replaces the old `AssignNumbers` pass.
 pub struct ExecuteProgram;
 
 impl Pass for ExecuteProgram {
     fn run(&mut self, doc: &mut Document) {
-        if !has_program_declarations(&doc.content) {
-            return;
-        }
-        let mut state = WalkState::new();
-        let mut var_meta: HashMap<String, VarMeta> = HashMap::new();
-        let mut triggers: Vec<OnDirective> = Vec::new();
-        let mut label_map: HashMap<String, LabelEntry> = HashMap::new();
-        let mut defs: Defs = HashMap::new();
-
-        program_walk(
-            &mut doc.content,
-            &mut state,
-            &mut var_meta,
-            &mut triggers,
-            &mut label_map,
-            &mut defs,
-            &[],
-        );
-
-        if !label_map.is_empty() {
-            doc.content
-                .attrs
-                .properties
-                .insert("__label_map".to_string(), encode_label_map(&label_map));
-        }
+        Runtime::run_static(doc);
     }
 }
 
@@ -191,37 +497,26 @@ fn has_program_declarations(node: &Node) -> bool {
     node.children.iter().any(has_program_declarations)
 }
 
-/// Named definition registry carried through the walk.
-type Defs = HashMap<String, (Vec<Declaration>, Vec<Init>)>;
-
-fn program_walk(
-    node: &mut Node,
-    state: &mut WalkState,
-    var_meta: &mut HashMap<String, VarMeta>,
-    triggers: &mut Vec<OnDirective>,
-    label_map: &mut HashMap<String, LabelEntry>,
-    defs: &mut Defs,
-    ancestors: &[NodeSnapshot],
-) {
+fn program_walk(node: &mut Node, ps: &mut Runtime, ancestors: &[NodeSnapshot]) {
     // 1. Process declarations on this node.
     let decls = node.attrs.declarations.clone();
-    process_declarations(&decls, state, var_meta, triggers, defs, &mut node.attrs.inits);
+    process_declarations(&decls, ps, &mut node.attrs.inits);
 
     // 2. Fire matching Enter triggers in declaration order.
     let snap = NodeSnapshot::from_node(node);
-    let trigger_snapshot = triggers.clone();
-    fire_triggers(Event::Enter, &trigger_snapshot, node, ancestors, state, var_meta, label_map);
+    let trigger_snapshot = ps.triggers.clone();
+    fire_triggers(Event::Enter, &trigger_snapshot, node, ancestors, ps);
 
     // 3. Recurse — children see (and modify) the running state.
     let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
     child_ancestors.push(snap);
     for child in &mut node.children {
-        program_walk(child, state, var_meta, triggers, label_map, defs, &child_ancestors);
+        program_walk(child, ps, &child_ancestors);
     }
 
     // 4. Fire matching Exit triggers after children.
-    let trigger_snapshot = triggers.clone();
-    fire_triggers(Event::Exit, &trigger_snapshot, node, ancestors, state, var_meta, label_map);
+    let trigger_snapshot = ps.triggers.clone();
+    fire_triggers(Event::Exit, &trigger_snapshot, node, ancestors, ps);
 }
 
 fn fire_triggers(
@@ -229,64 +524,451 @@ fn fire_triggers(
     triggers: &[OnDirective],
     node: &mut Node,
     ancestors: &[NodeSnapshot],
-    state: &mut WalkState,
-    var_meta: &HashMap<String, VarMeta>,
-    label_map: &mut HashMap<String, LabelEntry>,
+    rt: &mut Runtime,
 ) {
+    dispatch_triggers(event, triggers, node, ancestors, rt);
+}
+
+/// Fire matching triggers and return whether any fired.
+fn dispatch_triggers(
+    event: Event,
+    triggers: &[OnDirective],
+    node: &mut Node,
+    ancestors: &[NodeSnapshot],
+    rt: &mut Runtime,
+) -> bool {
+    let mut fired = false;
     for trigger in triggers {
         if trigger.event != event || !matches_selector(&trigger.selector, node, ancestors) {
             continue;
         }
+        fired = true;
         for action in &trigger.actions {
-            execute_action(action, node, state, var_meta, label_map);
+            execute_action(action, node, &mut rt.state, &rt.var_meta, &mut rt.label_map);
+        }
+    }
+    fired
+}
+
+/// Re-evaluate only Prepend/Append actions from matching triggers.
+///
+/// Called after dispatch to update content text nodes without re-firing
+/// side-effecting actions like @inc or @store.
+fn reapply_content(triggers: &[OnDirective], node: &mut Node, ancestors: &[NodeSnapshot]) {
+    for trigger in triggers {
+        if !matches_selector(&trigger.selector, node, ancestors) {
+            continue;
+        }
+        for action in &trigger.actions {
+            match action {
+                Action::Prepend { template } => {
+                    let text = interpolate_template(template.val(), &node.attrs.properties);
+                    if let Some(first) = node.children.first_mut() {
+                        if first.attrs.properties.contains_key("__content") {
+                            first.kind = NodeKind::Text(text);
+                            continue;
+                        }
+                    }
+                    let mut tn = Node::text(text);
+                    tn.attrs.properties
+                        .insert("__content".to_string(), Value::Bool(true));
+                    node.children.insert(0, tn);
+                }
+                Action::Append { template } => {
+                    let text = interpolate_template(template.val(), &node.attrs.properties);
+                    if let Some(last) = node.children.last_mut() {
+                        if last.attrs.properties.contains_key("__content_append") {
+                            last.kind = NodeKind::Text(text);
+                            continue;
+                        }
+                    }
+                    let mut tn = Node::text(text);
+                    tn.attrs.properties
+                        .insert("__content_append".to_string(), Value::Bool(true));
+                    node.children.push(tn);
+                }
+                _ => {}
+            }
         }
     }
 }
 
 /// Process a list of declarations: register vars, triggers, defs, and expand uses.
-fn process_declarations(
-    decls: &[Declaration],
-    state: &mut WalkState,
-    var_meta: &mut HashMap<String, VarMeta>,
-    triggers: &mut Vec<OnDirective>,
-    defs: &mut Defs,
-    inits: &mut Vec<Init>,
-) {
+fn process_declarations(decls: &[Declaration], ps: &mut Runtime, inits: &mut Vec<Init>) {
     for decl in decls {
-        process_one_declaration(decl, state, var_meta, triggers, defs, inits);
+        process_one_declaration(decl, ps, inits);
     }
 }
 
-fn process_one_declaration(
-    decl: &Declaration,
-    state: &mut WalkState,
-    var_meta: &mut HashMap<String, VarMeta>,
-    triggers: &mut Vec<OnDirective>,
-    defs: &mut Defs,
-    inits: &mut Vec<Init>,
-) {
+fn process_one_declaration(decl: &Declaration, ps: &mut Runtime, inits: &mut Vec<Init>) {
     match decl {
         Declaration::VarDecl(vd) => {
-            state.entry(vd.name.clone()).or_insert_with(|| vd.value.clone());
-            var_meta.entry(vd.name.clone()).or_insert_with(|| VarMeta {
-                initial: vd.value.clone(),
-                formats: vd.formats.iter().map(|f| FormatToken::parse(f)).collect(),
+            ps.state.entry(vd.name.clone()).or_insert_with(|| vd.value.val().clone());
+            ps.var_meta.entry(vd.name.clone()).or_insert_with(|| VarMeta {
+                initial: vd.value.val().clone(),
+                formats: vd.formats.val().iter().map(|f| FormatToken::parse(f)).collect(),
                 cycle: vd.cycle,
             });
         }
         Declaration::OnDirective(on) => {
-            triggers.push(on.clone());
+            ps.triggers.push(on.clone());
         }
-        Declaration::Def { name, body, inits: def_inits } => {
-            defs.insert(name.clone(), (body.clone(), def_inits.clone()));
+        Declaration::Def { name, params, body, inits: def_inits } => {
+            ps.defs.insert(name.clone(), (params.clone(), body.clone(), def_inits.clone()));
         }
-        Declaration::Use { name } => {
-            let Some((body, def_inits)) = defs.get(name).cloned() else {
+        Declaration::Use { name, overrides } => {
+            let Some((params, body, def_inits)) = ps.defs.get(name).cloned() else {
                 return;
             };
-            inits.extend(def_inits);
-            process_declarations(&body, state, var_meta, triggers, defs, inits);
+            if overrides.is_empty() && params.is_empty() {
+                inits.extend(def_inits);
+                process_declarations(&body, ps, inits);
+            } else {
+                let bindings = build_bindings(&params, overrides);
+                let expanded = resolve_decls(&body, &bindings);
+                let expanded_inits = resolve_inits(&def_inits, &bindings);
+                inits.extend(expanded_inits);
+                process_declarations(&expanded, ps, inits);
+            }
         }
+    }
+}
+
+// ── Traced ExecuteProgram ──
+
+fn execute_program_traced(doc: &mut Document, events: &mut Vec<TraceEvent>) {
+    if !has_program_declarations(&doc.content) {
+        return;
+    }
+    let mut rt = Runtime::new();
+    program_walk_traced(&mut doc.content, &mut rt, &[], events);
+    rt.finish(doc);
+}
+
+fn program_walk_traced(
+    node: &mut Node,
+    ps: &mut Runtime,
+    ancestors: &[NodeSnapshot],
+    events: &mut Vec<TraceEvent>,
+) {
+    let kind = node_kind_name(&node.kind).to_string();
+    events.push(TraceEvent::NodeEnter {
+        pass: "Execute".into(),
+        node_id: node.attrs.id.clone(),
+        kind,
+        node_properties: node.attrs.properties.clone(),
+    });
+
+    // 1. Process declarations with tracing.
+    let decls = node.attrs.declarations.clone();
+    process_declarations_traced(&decls, ps, &mut node.attrs.inits, events);
+
+    // 2. Fire matching Enter triggers.
+    let snap = NodeSnapshot::from_node(node);
+    let trigger_snapshot = ps.triggers.clone();
+    fire_triggers_traced(Event::Enter, &trigger_snapshot, node, ancestors, ps, events);
+
+    // 3. Recurse.
+    let mut child_ancestors: Vec<NodeSnapshot> = ancestors.to_vec();
+    child_ancestors.push(snap);
+    for child in &mut node.children {
+        program_walk_traced(child, ps, &child_ancestors, events);
+    }
+
+    // 4. Fire matching Exit triggers.
+    let trigger_snapshot = ps.triggers.clone();
+    fire_triggers_traced(Event::Exit, &trigger_snapshot, node, ancestors, ps, events);
+
+    events.push(TraceEvent::NodeExit {
+        pass: "Execute".into(),
+        node_id: node.attrs.id.clone(),
+        node_properties: node.attrs.properties.clone(),
+    });
+}
+
+fn trace_action(
+    action: &Action,
+    node: &Node,
+    state_before: HashMap<String, Value>,
+    state_after: HashMap<String, Value>,
+    events: &mut Vec<TraceEvent>,
+) {
+    let node_id = node.attrs.id.clone();
+    match action {
+        Action::Prepend { template } => {
+            let text = interpolate_template(template.val(), &node.attrs.properties);
+            events.push(TraceEvent::PrependText { node_id, text });
+        }
+        Action::Append { template } => {
+            let text = interpolate_template(template.val(), &node.attrs.properties);
+            events.push(TraceEvent::AppendText { node_id, text });
+        }
+        _ => {
+            events.push(TraceEvent::ActionExec {
+                node_id,
+                action: format!("{action}"),
+                state_before,
+                state_after,
+                node_properties: node.attrs.properties.clone(),
+            });
+        }
+    }
+}
+
+fn fire_triggers_traced(
+    event: Event,
+    triggers: &[OnDirective],
+    node: &mut Node,
+    ancestors: &[NodeSnapshot],
+    ps: &mut Runtime,
+    events: &mut Vec<TraceEvent>,
+) {
+    for trigger in triggers {
+        if trigger.event != event || !matches_selector(&trigger.selector, node, ancestors) {
+            continue;
+        }
+        let event_str = match event { Event::Enter => "enter", Event::Exit => "exit", Event::Click => "click" };
+        events.push(TraceEvent::TriggerMatch {
+            node_id: node.attrs.id.clone(),
+            selector: format!("{}", trigger.selector),
+            event: event_str.into(),
+        });
+        for action in &trigger.actions {
+            let state_before = ps.state.clone();
+            execute_action(action, node, &mut ps.state, &ps.var_meta, &mut ps.label_map);
+            let state_after = ps.state.clone();
+            trace_action(action, node, state_before, state_after, events);
+        }
+    }
+}
+
+fn trace_declaration(decl: &Declaration, defs: &Defs, events: &mut Vec<TraceEvent>) {
+    match decl {
+        Declaration::VarDecl(vd) => {
+            if let Bind::Val(v) = &vd.value {
+                events.push(TraceEvent::DeclareVar {
+                    name: vd.name.clone(),
+                    value: v.clone(),
+                });
+            }
+        }
+        Declaration::OnDirective(on) => {
+            let event_str = match on.event {
+                Event::Enter => "enter",
+                Event::Exit => "exit",
+                Event::Click => "click",
+            };
+            events.push(TraceEvent::RegisterTrigger {
+                selector: format!("{}", on.selector),
+                event: event_str.into(),
+                actions: on.actions.iter().map(|a| format!("{a}")).collect(),
+            });
+        }
+        Declaration::Def { name, params, .. } => {
+            events.push(TraceEvent::DefRegister {
+                name: name.clone(),
+                params: params.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+            });
+        }
+        Declaration::Use { name, overrides } => {
+            let Some((params, _, _)) = defs.get(name).cloned() else {
+                return;
+            };
+            let bindings = if overrides.is_empty() && params.is_empty() {
+                HashMap::new()
+            } else {
+                build_bindings(&params, overrides)
+            };
+            events.push(TraceEvent::UseExpand {
+                name: name.clone(),
+                bindings,
+            });
+        }
+    }
+}
+
+fn process_declarations_traced(
+    decls: &[Declaration],
+    ps: &mut Runtime,
+    inits: &mut Vec<Init>,
+    events: &mut Vec<TraceEvent>,
+) {
+    for decl in decls {
+        trace_declaration(decl, &ps.defs, events);
+        process_one_declaration(decl, ps, inits);
+    }
+}
+
+/// Extract and remove the internal label map from the document root.
+fn take_label_map(doc: &mut Document) -> HashMap<String, LabelEntry> {
+    let map = doc
+        .content
+        .attrs
+        .properties
+        .get("__label_map")
+        .map(decode_label_map)
+        .unwrap_or_default();
+    if !map.is_empty() {
+        doc.content.attrs.properties.remove("__label_map");
+    }
+    map
+}
+
+/// Common preamble for ResolveCrossRefs (traced and non-traced).
+fn with_label_map(doc: &mut Document, walk: impl FnOnce(&mut Node, &HashMap<String, LabelEntry>)) {
+    let label_map = take_label_map(doc);
+    if !label_map.is_empty() {
+        walk(&mut doc.content, &label_map);
+    }
+}
+
+// ── Traced ResolveCrossRefs ──
+
+fn resolve_refs_traced(doc: &mut Document, events: &mut Vec<TraceEvent>) {
+    with_label_map(doc, |root, lm| resolve_refs_walk_traced(root, lm, events));
+}
+
+fn resolve_refs_walk_traced(
+    node: &mut Node,
+    label_map: &HashMap<String, LabelEntry>,
+    events: &mut Vec<TraceEvent>,
+) {
+    events.push(TraceEvent::NodeEnter {
+        pass: "CrossRefs".into(),
+        node_id: node.attrs.id.clone(),
+        kind: node_kind_name(&node.kind).to_string(),
+        node_properties: node.attrs.properties.clone(),
+    });
+
+    if let NodeKind::CrossRef { target } = &node.kind
+        && let Some(entry) = label_map.get(target)
+    {
+        let display = format_label_display(&entry.label_template, &entry.number);
+        node.attrs
+            .properties
+            .insert("text".to_string(), Value::Text(display.clone()));
+        node.attrs
+            .properties
+            .insert("href".to_string(), Value::Text(format!("#{target}")));
+        events.push(TraceEvent::ResolveRef {
+            node_id: node.attrs.id.clone(),
+            target: target.clone(),
+            resolved_text: display,
+            node_properties: node.attrs.properties.clone(),
+        });
+    }
+
+    for child in &mut node.children {
+        resolve_refs_walk_traced(child, label_map, events);
+    }
+
+    events.push(TraceEvent::NodeExit {
+        pass: "CrossRefs".into(),
+        node_id: node.attrs.id.clone(),
+        node_properties: node.attrs.properties.clone(),
+    });
+}
+
+// ── @arg resolution ──
+
+/// Build a parameter name → value map from defaults and overrides.
+fn build_bindings(
+    params: &[(String, String)],
+    overrides: &[(String, String)],
+) -> HashMap<String, String> {
+    params
+        .iter()
+        .map(|(name, default)| {
+            let value = overrides
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| default.clone());
+            (name.clone(), value)
+        })
+        .collect()
+}
+
+/// Resolve all `Bind::Arg` references in a list of declarations.
+fn resolve_decls(
+    decls: &[Declaration],
+    bindings: &HashMap<String, String>,
+) -> Vec<Declaration> {
+    decls.iter().map(|d| resolve_decl(d, bindings)).collect()
+}
+
+fn resolve_decl(decl: &Declaration, bindings: &HashMap<String, String>) -> Declaration {
+    match decl {
+        Declaration::VarDecl(vd) => {
+            let mut vd = vd.clone();
+            vd.value = resolve_bind(&vd.value, bindings, |s| {
+                crate::parse::parse_initial_value(s)
+            });
+            vd.formats = resolve_bind(&vd.formats, bindings, |s| {
+                crate::parse::parse_format_list(s)
+            });
+            Declaration::VarDecl(vd)
+        }
+        Declaration::OnDirective(on) => {
+            let mut on = on.clone();
+            on.actions = on.actions.iter().map(|a| resolve_action(a, bindings)).collect();
+            Declaration::OnDirective(on)
+        }
+        Declaration::Def { name, params, body, inits: def_inits } => Declaration::Def {
+            name: name.clone(),
+            params: params.clone(),
+            body: resolve_decls(body, bindings),
+            inits: resolve_inits(def_inits, bindings),
+        },
+        Declaration::Use { .. } => decl.clone(),
+    }
+}
+
+fn resolve_action(action: &Action, bindings: &HashMap<String, String>) -> Action {
+    match action {
+        Action::Prepend { template } => Action::Prepend {
+            template: resolve_bind(template, bindings, |s| s.to_string()),
+        },
+        Action::Append { template } => Action::Append {
+            template: resolve_bind(template, bindings, |s| s.to_string()),
+        },
+        Action::SetProperty { property, value } => Action::SetProperty {
+            property: property.clone(),
+            value: resolve_bind(value, bindings, crate::parse::parse_init_value),
+        },
+        Action::Reset { var, to } => Action::Reset {
+            var: var.clone(),
+            to: resolve_bind(to, bindings, crate::parse::parse_initial_value),
+        },
+        other => other.clone(),
+    }
+}
+
+fn resolve_inits(inits: &[Init], bindings: &HashMap<String, String>) -> Vec<Init> {
+    inits
+        .iter()
+        .map(|init| Init {
+            selector: init.selector.clone(),
+            property: init.property.clone(),
+            value: resolve_bind(&init.value, bindings, |s| {
+                crate::parse::parse_init_value(s)
+            }),
+        })
+        .collect()
+}
+
+/// Resolve a `Bind<T>`: if `Arg(name)`, look up the binding and parse it; otherwise keep as-is.
+fn resolve_bind<T: Clone, F: Fn(&str) -> T>(
+    bind: &Bind<T>,
+    bindings: &HashMap<String, String>,
+    parse: F,
+) -> Bind<T> {
+    match bind {
+        Bind::Val(_) => bind.clone(),
+        Bind::Arg(name) => match bindings.get(name) {
+            Some(value) => Bind::Val(parse(value)),
+            None => bind.clone(),
+        },
     }
 }
 
@@ -328,6 +1010,7 @@ fn execute_action(
         }
         Action::Reset { var, to } => {
             // Use the provided reset value, or fall back to var's initial value.
+            let to = to.val();
             let reset_val = if matches!(to, Value::Number(n) if *n == 0.0) {
                 var_meta
                     .get(var)
@@ -344,15 +1027,35 @@ fn execute_action(
         Action::SetProperty { property, value } => {
             node.attrs
                 .properties
-                .insert(property.clone(), value.clone());
+                .insert(property.clone(), value.val().clone());
         }
         Action::Prepend { template } => {
-            let text = interpolate_template(template, &node.attrs.properties);
-            node.children.insert(0, Node::text(text));
+            let text = interpolate_template(template.val(), &node.attrs.properties);
+            // Idempotent: update existing content node if present
+            if let Some(first) = node.children.first_mut() {
+                if first.attrs.properties.contains_key("__content") {
+                    first.kind = NodeKind::Text(text);
+                    return;
+                }
+            }
+            let mut tn = Node::text(text);
+            tn.attrs.properties
+                .insert("__content".to_string(), Value::Bool(true));
+            node.children.insert(0, tn);
         }
         Action::Append { template } => {
-            let text = interpolate_template(template, &node.attrs.properties);
-            node.children.push(Node::text(text));
+            let text = interpolate_template(template.val(), &node.attrs.properties);
+            // Idempotent: update existing content node if present
+            if let Some(last) = node.children.last_mut() {
+                if last.attrs.properties.contains_key("__content_append") {
+                    last.kind = NodeKind::Text(text);
+                    return;
+                }
+            }
+            let mut tn = Node::text(text);
+            tn.attrs.properties
+                .insert("__content_append".to_string(), Value::Bool(true));
+            node.children.push(tn);
         }
     }
 }
@@ -538,22 +1241,7 @@ pub struct ResolveCrossRefs;
 
 impl Pass for ResolveCrossRefs {
     fn run(&mut self, doc: &mut Document) {
-        let label_map = doc
-            .content
-            .attrs
-            .properties
-            .get("__label_map")
-            .map(decode_label_map)
-            .unwrap_or_default();
-
-        if label_map.is_empty() {
-            return;
-        }
-
-        resolve_refs(&mut doc.content, &label_map);
-
-        // Clean up the internal label map property.
-        doc.content.attrs.properties.remove("__label_map");
+        with_label_map(doc, resolve_refs);
     }
 }
 
@@ -786,7 +1474,7 @@ mod tests {
                 ..Default::default()
             })),
             property: "preview".to_string(),
-            value: Value::Bool(true),
+            value: Bind::Val(Value::Bool(true)),
         });
         resolve_document(&mut doc);
 
@@ -1830,9 +2518,9 @@ See @fig:pic.";
     }
 
     const PRELUDE: &str = r#"
-@def(numbering) {
+@def(numbering, format=["I","1"], content="{number}. ") {
   @var(fig, 0);
-  @var(index, [0], format=["I","1"]);
+  @var(index, [0], format=@arg(format));
   @var(val, 0);
 
   @on(enter, section > section) {
@@ -1856,6 +2544,8 @@ See @fig:pic.";
     @inc(fig);
     @store(number, fig);
   }
+
+  @content(heading, @arg(content));
 }
 
 @use(numbering);
@@ -1956,4 +2646,339 @@ See @sec:intro and @fig:d.";
         assert_eq!(fig_text, Some("Figure 1"));
     }
 
+    #[test]
+    fn prelude_content_in_def() {
+        reset_id_counter();
+        let md = "\
+# Introduction {#sec:intro}
+
+## Background {#sec:bg}";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        assert_eq!(headings.len(), 2);
+        // @content(heading, "{number}. ") should prepend a text node
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I. ", "h1 should get 'I. ' prefix");
+        } else {
+            panic!("expected Text node as first child of heading, got {:?}", first_child.kind);
+        }
+        let first_child = &headings[1].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I.1. ", "h2 should get 'I.1. ' prefix");
+        } else {
+            panic!("expected Text node as first child of heading, got {:?}", first_child.kind);
+        }
+    }
+
+    #[test]
+    fn prelude_content_and_cross_ref() {
+        reset_id_counter();
+        let md = "\
+# Intro {#sec:intro}
+
+See @sec:intro.";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, PRELUDE);
+        resolve_document(&mut doc);
+
+        // Heading gets visible number prefix
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            assert_eq!(t, "I. ");
+        } else {
+            panic!("expected Text prefix");
+        }
+
+        // Cross-ref still resolves to label (not the visible prefix)
+        let refs = find_all(&doc.content, |n| matches!(n.kind, NodeKind::CrossRef { .. }));
+        assert_eq!(refs.len(), 1);
+        let sec_text = refs[0].attrs.properties.get("text").and_then(|v| match v {
+            Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        });
+        assert_eq!(sec_text, Some("Section I"));
+    }
+
+    #[test]
+    fn def_params_defaults() {
+        // @use with no overrides should use default params
+        reset_id_counter();
+        let prelude = r#"
+@def(numbering, format=["I","1"], content="{number}. ") {
+  @var(fig, 0);
+  @var(index, [0], format=@arg(format));
+  @var(val, 0);
+  @on(enter, section > section) {
+    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
+  }
+  @on(exit, section > section) { @pop(index); }
+  @on(enter, heading) {
+    @pop(index, val); @store(number, index); @push(index, val);
+  }
+  @on(enter, figure) { @inc(fig); @store(number, fig); }
+  @content(heading, @arg(content));
+}
+@use(numbering);
+@init(heading, label="Section {n}");
+"#;
+        let md = "# Hello";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, prelude);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            // Default format is ["I","1"], so top-level heading should be Roman "I"
+            assert_eq!(t, "I. ");
+        } else {
+            panic!("expected Text prefix, got {:?}", first_child.kind);
+        }
+    }
+
+    #[test]
+    fn def_params_override() {
+        // @use with overrides should substitute @arg values
+        reset_id_counter();
+        let prelude = r#"
+@def(numbering, format=["I","1"], content="{number}. ") {
+  @var(fig, 0);
+  @var(index, [0], format=@arg(format));
+  @var(val, 0);
+  @on(enter, section > section) {
+    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
+  }
+  @on(exit, section > section) { @pop(index); }
+  @on(enter, heading) {
+    @pop(index, val); @store(number, index); @push(index, val);
+  }
+  @on(enter, figure) { @inc(fig); @store(number, fig); }
+  @content(heading, @arg(content));
+}
+@use(numbering, format=["1","1"]);
+@init(heading, label="Section {n}");
+"#;
+        let md = "# Hello";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, prelude);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            // Overridden format is ["1","1"], so top-level heading should be Arabic "1"
+            assert_eq!(t, "1. ");
+        } else {
+            panic!("expected Text prefix, got {:?}", first_child.kind);
+        }
+    }
+
+    #[test]
+    fn def_params_partial_override() {
+        // Override only content, keep default format
+        reset_id_counter();
+        let prelude = r#"
+@def(numbering, format=["I","1"], content="{number}. ") {
+  @var(fig, 0);
+  @var(index, [0], format=@arg(format));
+  @var(val, 0);
+  @on(enter, section > section) {
+    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
+  }
+  @on(exit, section > section) { @pop(index); }
+  @on(enter, heading) {
+    @pop(index, val); @store(number, index); @push(index, val);
+  }
+  @on(enter, figure) { @inc(fig); @store(number, fig); }
+  @content(heading, @arg(content));
+}
+@use(numbering, content="{number}) ");
+@init(heading, label="Section {n}");
+"#;
+        let md = "# Hello";
+        let mut doc = parse(md).unwrap();
+        inject_prelude(&mut doc, prelude);
+        resolve_document(&mut doc);
+
+        let headings = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Heading { .. }));
+        let first_child = &headings[0].children[0];
+        if let NodeKind::Text(ref t) = first_child.kind {
+            // Format defaults to Roman "I", content overridden to ") "
+            assert_eq!(t, "I) ");
+        } else {
+            panic!("expected Text prefix, got {:?}", first_child.kind);
+        }
+    }
+
+    // ── Runtime dispatch tests ──
+
+    #[test]
+    fn dispatch_click_fires_trigger() {
+        reset_id_counter();
+        let mut doc = parse(concat!(
+            "{@var(count, 0)}\n",
+            "{@on(click, heading, @inc(count), @store(number, count))}\n\n",
+            "# Hello {#greeting}\n",
+        ))
+        .unwrap();
+
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        let mut rt = Runtime::init(&mut doc);
+
+        // Before click: heading has no 'number' property.
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+        assert!(heading.attrs.properties.get("number").is_none());
+
+        // Dispatch click on the heading.
+        let changed = rt.dispatch(&mut doc, Event::Click, "greeting");
+        assert!(!changed.is_empty(), "click should fire a trigger");
+
+        // After click: heading should have number="1".
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+        assert_eq!(
+            heading.attrs.properties.get("number"),
+            Some(&Value::Text("1".into())),
+        );
+
+        // Second click: number should be "2".
+        rt.dispatch(&mut doc, Event::Click, "greeting");
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+        assert_eq!(
+            heading.attrs.properties.get("number"),
+            Some(&Value::Text("2".into())),
+        );
+    }
+
+    #[test]
+    fn dispatch_no_matching_trigger() {
+        reset_id_counter();
+        let mut doc = parse(concat!(
+            "{@var(count, 0)}\n",
+            "{@on(click, figure, @increment(count))}\n\n",
+            "# Hello {#greeting}\n",
+        ))
+        .unwrap();
+
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        let mut rt = Runtime::init(&mut doc);
+
+        // Click on heading, but trigger is for figure — should not fire.
+        let changed = rt.dispatch(&mut doc, Event::Click, "greeting");
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn dispatch_unknown_node_id() {
+        reset_id_counter();
+        let mut doc = parse("# Hello\n").unwrap();
+
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        let mut rt = Runtime::init(&mut doc);
+
+        let changed = rt.dispatch(&mut doc, Event::Click, "nonexistent");
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn dispatch_reapplies_content_template() {
+        reset_id_counter();
+        let mut doc = parse(concat!(
+            "{@var(count, 0, format=\"1\")}\n",
+            "{@on(click, heading, @inc(count), @store(number, count))}\n",
+            "{@content(heading, \"{number}. \")}\n\n",
+            "# Apple {#fruit:apple}\n",
+        ))
+        .unwrap();
+
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        let mut rt = Runtime::init(&mut doc);
+
+        // Before click: heading has content node but number is empty so text is ". "
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+        assert!(heading.attrs.properties.get("number").is_none());
+
+        // Click: should set number="1" and update prepended text to "1. "
+        rt.dispatch(&mut doc, Event::Click, "fruit:apple");
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+        assert_eq!(
+            heading.attrs.properties.get("number"),
+            Some(&Value::Text("1".into())),
+        );
+        // First child should be the content text node with "1. "
+        let first_child = &heading.children[0];
+        assert!(
+            matches!(&first_child.kind, NodeKind::Text(s) if s == "1. "),
+            "expected Text(\"1. \"), got {:?}",
+            first_child.kind,
+        );
+        assert!(first_child.attrs.properties.contains_key("__content"));
+    }
+
+    #[test]
+    fn dispatch_content_is_idempotent() {
+        reset_id_counter();
+        let mut doc = parse(concat!(
+            "{@var(count, 0, format=\"1\")}\n",
+            "{@on(click, heading, @inc(count), @store(number, count))}\n",
+            "{@content(heading, \"{number}. \")}\n\n",
+            "# Apple {#fruit:apple}\n",
+        ))
+        .unwrap();
+
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        let mut rt = Runtime::init(&mut doc);
+
+        // Click three times
+        rt.dispatch(&mut doc, Event::Click, "fruit:apple");
+        rt.dispatch(&mut doc, Event::Click, "fruit:apple");
+        rt.dispatch(&mut doc, Event::Click, "fruit:apple");
+
+        let heading = find_node(&doc.content, |n| {
+            matches!(&n.kind, NodeKind::Heading { .. })
+        })
+        .unwrap();
+
+        // Should have number="3"
+        assert_eq!(
+            heading.attrs.properties.get("number"),
+            Some(&Value::Text("3".into())),
+        );
+        // Should still have exactly one content text node, not three
+        let content_nodes: Vec<_> = heading
+            .children
+            .iter()
+            .filter(|c| c.attrs.properties.contains_key("__content"))
+            .collect();
+        assert_eq!(content_nodes.len(), 1, "should not duplicate content nodes");
+        assert!(
+            matches!(&content_nodes[0].kind, NodeKind::Text(s) if s == "3. "),
+            "expected Text(\"3. \"), got {:?}",
+            content_nodes[0].kind,
+        );
+    }
 }

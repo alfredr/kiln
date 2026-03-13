@@ -1,0 +1,37 @@
+# Docs site prelude — Arabic numbering (1, 1.1, 1.2)
+#
+# Uses the built-in numbering macro with format overridden to all-Arabic.
+
+@def(numbering, format=["I","1"], content="{number}. ") {
+  @var(fig, 0);
+  @var(index, [0], format=@arg(format));
+  @var(val, 0);
+
+  @on(enter, section > section) {
+    @pop(index, val);
+    @inc(val);
+    @push(index, val);
+    @push(index, 0);
+  }
+
+  @on(exit, section > section) {
+    @pop(index);
+  }
+
+  @on(enter, heading) {
+    @pop(index, val);
+    @store(number, index);
+    @push(index, val);
+  }
+
+  @on(enter, figure) {
+    @inc(fig);
+    @store(number, fig);
+  }
+
+  @content(heading, @arg(content));
+}
+
+@use(numbering, format=["1","1"]);
+@init(figure, label="Figure {n}");
+@init(heading, label="Section {n}");

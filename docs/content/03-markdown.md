@@ -4,7 +4,7 @@ title: "Markdown Syntax"
 
 Kiln uses its own markdown parser built from the CommonMark spec with several extensions. This page is a reference for every supported syntax element.
 
-## Headings
+## Headings {#sec:headings}
 
 Use `#` characters at the start of a line to create headings, from level 1 through level 6.
 
@@ -124,7 +124,7 @@ This renders as an `<a>` element. You can also add a title:
 [Kiln on GitHub](https://github.com/example/kiln "Visit the repo")
 ```
 
-## Images
+## Images {#sec:images}
 
 Insert images with the `![alt](src)` syntax:
 
@@ -206,7 +206,7 @@ Block quotes nest by stacking `>` characters:
 > > Nested quote
 ```
 
-## Code Blocks
+## Code Blocks {#sec:code-blocks}
 
 Fence a block of code with triple backticks or triple tildes. Add a language identifier after the opening fence for syntax highlighting:
 
@@ -248,7 +248,7 @@ ___
 
 Each produces a `<hr>` element. You can use spaces between the characters if you prefer: `- - -` also works.
 
-## Math
+## Math {#sec:math}
 
 Kiln supports LaTeX-style math syntax.
 
@@ -270,7 +270,7 @@ $$
 
 Display math renders as a block element, centered on its own line. You can pair this with a math rendering library like KaTeX or MathJax in your templates.
 
-## Escaping Special Characters
+## Escaping Special Characters {#sec:escaping}
 
 Prefix any special character with a backslash to render it literally:
 

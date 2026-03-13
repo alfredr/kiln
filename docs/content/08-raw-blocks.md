@@ -5,7 +5,7 @@ slug: raw-blocks
 
 In standard Markdown, fenced code blocks render as `<pre><code>` elements — formatted source code displayed on the page. kiln extends this behavior with **raw blocks**: fenced code blocks marked with the `{=format}` attribute that are passed to a compiler for transformation instead of being rendered as code listings.
 
-## How Raw Blocks Work
+## How Raw Blocks Work {#sec:how}
 
 A raw block uses the `{=format}` brace attribute on a fenced code block. The `=` prefix signals that the content should be compiled rather than displayed as code. The format name after `=` tells kiln which compiler to use.
 
@@ -27,7 +27,7 @@ This is passed to the Typst compiler and rendered as HTML output.
 
 The difference is the `{=format}` attribute. Without it, every fenced code block — including ` ```html `, ` ```typst `, and ` ```mermaid ` — renders as a normal code listing.
 
-## Supported Formats
+## Supported Formats {#sec:formats}
 
 kiln's built-in compiler handles these formats:
 
@@ -38,7 +38,7 @@ kiln's built-in compiler handles these formats:
 | `mermaid`    | `{=mermaid}`    | Mermaid diagrams, compiled to inline SVG         |
 | `html`       | `{=html}`       | Raw HTML, passed through without escaping        |
 
-## Typst Blocks
+## Typst Blocks {#sec:typst}
 
 Typst is a modern typesetting system. kiln ships with built-in Typst compilation, so you can embed Typst content directly in your Markdown posts and pages.
 
@@ -117,7 +117,7 @@ This produces:
 
 Compare this with `{=typst}` (SVG) — the SVG version renders everything Typst supports, while the HTML version is smaller and flows with the page text but may drop visual elements.
 
-## HTML Blocks
+## HTML Blocks {#sec:html}
 
 Use `{=html}` to inject raw HTML into your content without Markdown processing or escaping:
 
@@ -141,7 +141,7 @@ The HTML is inserted into the page output as-is. This is helpful for embedding w
 
 Note that ` ```html ` (without `{=html}`) renders as a normal code block — useful for showing HTML examples in documentation.
 
-## Mermaid Blocks
+## Mermaid Blocks {#sec:mermaid}
 
 Mermaid is a diagramming language for creating flowcharts, sequence diagrams, Gantt charts, and more:
 
@@ -163,7 +163,7 @@ flowchart LR
 
 kiln compiles Mermaid diagrams to inline SVG at build time using a native Rust renderer. No client-side JavaScript is required — the diagram is embedded directly in the page, just like Typst blocks.
 
-## Behavior Without a Compiler
+## Behavior Without a Compiler {#sec:no-compiler}
 
 When kiln encounters a raw block but no compiler is available for it, the block falls back to a `<pre>` element with a `data-format` attribute:
 
@@ -175,7 +175,7 @@ When kiln encounters a raw block but no compiler is available for it, the block 
 
 The source content is preserved verbatim. This makes it possible to handle rendering on the client side, or to gracefully degrade when a compiler is not present.
 
-## Attributes on Raw Blocks
+## Attributes on Raw Blocks {#sec:attrs}
 
 Raw blocks support additional brace attributes alongside the `=format` marker. You can attach IDs and classes:
 
@@ -202,7 +202,7 @@ This is equivalent to `{=typst #fig:summary .wide}`.
 
 These attributes are applied to the output element, allowing you to target specific raw blocks with CSS or reference them with anchor links.
 
-## The `RawBlockCompiler` Trait
+## The `RawBlockCompiler` Trait {#sec:trait}
 
 For advanced users and tool authors, kiln's document library (`kiln-doc`) defines a `RawBlockCompiler` trait. This is the interface that compilers implement to handle raw blocks.
 

@@ -1717,8 +1717,19 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "syntect",
+]
+
+[[package]]
+name = "kiln-doc-wasm"
+version = "0.1.0"
+dependencies = [
+ "kiln-doc",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@ mod inline;
 mod section;
 
 pub use attrs::parse_prelude;
+pub(crate) use attrs::{parse_format_list, parse_init_value, parse_initial_value};
 
 use crate::ast::{Attrs, Document, Metadata, Node, NodeKind};
 
@@ -763,7 +764,10 @@ mod tests {
             .flat_map(|n| &n.attrs.declarations)
             .find(|d| matches!(d, Declaration::VarDecl(_)))?;
         if let Declaration::VarDecl(vd) = decl {
-            Some(vd.formats.clone())
+            match &vd.formats {
+                crate::ast::Bind::Val(f) => Some(f.clone()),
+                crate::ast::Bind::Arg(_) => None,
+            }
         } else {
             None
         }
@@ -838,7 +842,7 @@ mod tests {
             .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
-        assert!(matches!(&hints[0].value, Value::Text(s) if s == "Figure"));
+        assert!(matches!(hints[0].value.val(), Value::Text(s) if s == "Figure"));
     }
 
     #[test]
@@ -852,7 +856,7 @@ mod tests {
             .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
-        assert!(matches!(&hints[0].value, Value::Bool(true)));
+        assert!(matches!(hints[0].value.val(), Value::Bool(true)));
     }
 
     #[test]
@@ -866,7 +870,7 @@ mod tests {
             .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
-        assert!(matches!(&hints[0].value, Value::Bool(false)));
+        assert!(matches!(hints[0].value.val(), Value::Bool(false)));
     }
 
     #[test]
@@ -880,7 +884,7 @@ mod tests {
             .flat_map(|n| n.attrs.inits.iter())
             .collect();
         assert_eq!(hints.len(), 1);
-        assert!(matches!(&hints[0].value, Value::Number(n) if *n == 4.0));
+        assert!(matches!(hints[0].value.val(), Value::Number(n) if *n == 4.0));
     }
 
     #[test]
@@ -1159,7 +1163,7 @@ mod tests {
         crate::resolve::HoistDirectives.run(&mut doc);
         let hint = doc.content.attrs.inits.iter().find(|h| h.property == "layout");
         assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "full"));
+        assert!(matches!(hint.unwrap().value.val(), Value::Text(s) if s == "full"));
     }
 
     #[test]
@@ -1371,7 +1375,7 @@ mod tests {
         crate::resolve::HoistDirectives.run(&mut doc);
         let hint = doc.content.attrs.inits.iter().find(|h| h.property == "theme");
         assert!(hint.is_some());
-        assert!(matches!(&hint.unwrap().value, Value::Text(s) if s == "monokai"));
+        assert!(matches!(hint.unwrap().value.val(), Value::Text(s) if s == "monokai"));
     }
 
     // ── Multiple hints on same directive ──

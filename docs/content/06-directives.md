@@ -4,7 +4,7 @@ title: "Directives"
 
 Directives use the `{@command(args)}` syntax to declare document-level configuration. Place a directive on its own line.
 
-## Def / Use
+## Def / Use {#sec:def-use}
 
 Group declarations into a named block with `@def`, then activate them with `@use`. This is the foundation of kiln's numbering system — the built-in prelude uses `@def`/`@use` to define all standard numbering.
 
@@ -22,6 +22,7 @@ Group declarations into a named block with `@def`, then activate them with `@use
     @pop(index, val); @store(number, index); @push(index, val);
   }
   @on(enter, figure) { @inc(fig); @store(number, fig); }
+  @content(heading, "{number}. ");
 }
 
 @use(numbering);
@@ -29,7 +30,27 @@ Group declarations into a named block with `@def`, then activate them with `@use
 
 `@def` registers the block by name without executing it. `@use` expands the block at the call site. This lets prelude files define reusable numbering schemes that documents opt into.
 
-## Init
+### Parameterized Def / Use
+
+`@def` can declare parameters with defaults, and `@use` can override them. Use `@arg(name)` inside the body to reference a parameter:
+
+```
+@def(numbering, format=["I","1"], content="{number}. ") {
+  @var(index, [0], format=@arg(format));
+  @content(heading, @arg(content));
+  # ... other declarations ...
+}
+
+@use(numbering);                                   # all defaults
+@use(numbering, format=["1","1"]);                 # override format only
+@use(numbering, format=["1","a"], content="§{number} ");  # override both
+```
+
+When `@use` has overrides, the body is re-expanded with `@arg(name)` replaced by the override value (or the default if not overridden). When there are no overrides and no params, the pre-parsed body is used directly.
+
+Parameters are untyped text — `@arg(name)` is replaced with the value string, and the surrounding context determines the type. An array value like `["1","a"]` stays an array; a string value like `"{number}. "` stays a string.
+
+## Init {#sec:init}
 
 Set cascading property defaults on elements matching a CSS-like selector. Inits use "set if not exists" — authored values on individual nodes are never overwritten.
 
@@ -53,7 +74,7 @@ You can place an init directive inside a brace attribute block to scope it to th
 ## Chapter One {#ch1 {@init(this, numbering=true)}}
 ```
 
-## Var
+## Var {#sec:var}
 
 Declare a running-state variable for use in `@on` triggers:
 
@@ -72,7 +93,7 @@ Declare a running-state variable for use in `@on` triggers:
 
 The initial value determines the variable's type. A `Number` starts at zero and increments by 1 with `@inc`. A `List` starts empty and extends/truncates by heading depth with `@inc`.
 
-## On
+## On {#sec:on}
 
 Bind actions to nodes matching a selector. Actions fire in declaration order during a document-order tree walk:
 
@@ -84,11 +105,12 @@ Bind actions to nodes matching a selector. Actions fire in declaration order dur
 
 The first argument is a CSS-like selector (kind names, classes, IDs, attribute matchers, combinators). All subsequent `@`-prefixed arguments are actions.
 
-An optional event phase (`enter` or `exit`) can precede the selector. `enter` (the default) fires before children are processed; `exit` fires after:
+An optional event phase can precede the selector. `enter` (the default) fires before children are processed; `exit` fires after; `click` fires on user interaction in interactive/browser mode:
 
 ```markdown
 {@on(enter, section > section, @inc(depth))}
 {@on(exit, section > section, @dec(depth))}
+{@on(click, heading, @inc(count), @store(number, count))}
 ```
 
 **Available actions:**
@@ -98,6 +120,7 @@ An optional event phase (`enter` or `exit`) can precede the selector. `enter` (t
 | `@inc(var)` | Increment a numeric variable by 1. |
 | `@dec(var)` | Decrement a numeric variable by 1. |
 | `@reset(var)` | Reset variable to its initial value. |
+| `@reset(var, value)` | Reset variable to a specific value. |
 | `@pop(list)` | Pop the last element from a list (discard). |
 | `@pop(list, var)` | Pop the last element from a list into a variable. |
 | `@push(list, var)` | Push a variable's value onto a list. |
@@ -109,7 +132,7 @@ An optional event phase (`enter` or `exit`) can precede the selector. `enter` (t
 
 Text templates support `{key}` interpolation from node properties. For example, `{number}` reads the node's `number` property. Missing keys interpolate as empty strings.
 
-## Content
+## Content {#sec:content}
 
 Shorthand for `@on(SELECTOR, @prepend(@text(TEMPLATE)))` — prepend formatted text to matching nodes:
 
@@ -123,7 +146,7 @@ This is equivalent to:
 {@on(heading, @prepend(@text("{number}. ")))}
 ```
 
-## Composing a Complete Numbering Scheme
+## Composing a Complete Numbering Scheme {#sec:composing}
 
 Numbering is built from `@var`, `@on`, `@init`, and `@content` primitives. The `@def`/`@use` mechanism groups them into reusable blocks. Here are several complete examples.
 
@@ -144,13 +167,11 @@ See @fig:arch and @fig:pipeline.
 
 Result: figures are numbered 1, 2. Cross-references render as "Figure 1" and "Figure 2".
 
-**Hierarchical section numbering with content transformation:**
+**Hierarchical section numbering with cross-references:**
 
-The built-in prelude provides this automatically. To display visible numbers, add `@content`:
+The built-in prelude provides this automatically — headings are numbered and `@content` prepends the visible number:
 
 ```markdown
-{@content(heading, "{number}. ")}
-
 # Introduction {#sec:intro}
 
 ## Background {#sec:bg}
@@ -171,21 +192,11 @@ Result:
 
 **Three-level numbering with a custom prelude:**
 
-Create a `.kiln` prelude with three format levels:
+Create a `.kiln` prelude that overrides the format parameter to add a third level:
 
 ```
-@def(numbering) {
-  @var(index, [0], format=["I","1","a"]);
-  @var(val, 0);
-  @on(enter, section > section) {
-    @pop(index, val); @inc(val); @push(index, val); @push(index, 0);
-  }
-  @on(exit, section > section) { @pop(index); }
-  @on(enter, heading) {
-    @pop(index, val); @store(number, index); @push(index, val);
-  }
-}
-@use(numbering);
+# Copy the @def from the built-in prelude, then override at @use:
+@use(numbering, format=["I","1","a"]);
 @init(heading, label="Section {n}");
 ```
 
@@ -216,39 +227,42 @@ Use `@set` to attach arbitrary properties to matching nodes:
 
 This sets `loading="lazy"` on every figure and `theme="monokai"` on Rust code blocks, which your templates or CSS can consume.
 
-## Prelude
+## Prelude {#sec:prelude}
 
-kiln ships a built-in prelude that defines hierarchical section numbering and flat figure numbering. The prelude is automatically loaded for every document. It contains the `@def(numbering)` block shown [above](#def--use), plus two `@init` lines that set default cross-reference labels:
+kiln ships a built-in prelude that defines hierarchical section numbering and flat figure numbering. The prelude is automatically loaded for every document. It defines a parameterized `@def(numbering)` block with two customizable parameters:
+
+- `format` — number format tokens per depth level (default: `["I","1"]` for Roman/Arabic)
+- `content` — text template prepended to headings (default: `"{number}. "`)
+
+The prelude also sets default cross-reference labels via `@init`:
 
 ```
 @init(figure, label="Figure {n}");
 @init(heading, label="Section {n}");
 ```
 
-This means you can use `@fig:name` and `@sec:name` cross-references out of the box — the prelude sets up the counters and label templates. To display visible section numbers in headings, add a `@content` directive to your document:
+This means headings are automatically numbered and `@fig:name`/`@sec:name` cross-references work out of the box:
 
 ```markdown
-{@content(heading, "{number}. ")}
-
 # Introduction {#sec:intro}
 
 ## Background {#sec:bg}
+
+See @sec:intro for context.
 ```
+
+Result: headings render as "I. Introduction", "I.1. Background", and the cross-reference resolves to "Section I".
 
 ### `.kiln` File Format
 
-The prelude is a `.kiln` file with `@def`/`@use` blocks, inline directives, and `#` for comments. A custom prelude has the same structure as the built-in one but can change format tokens and labels:
+The prelude is a `.kiln` file with `@def`/`@use` blocks, inline directives, and `#` for comments. A custom prelude can override the numbering parameters at the `@use` site without duplicating the full `@def` body:
 
 ```
-# My custom prelude — same numbering structure,
-# but with "1, a" format levels and short labels
-@def(numbering) {
-  @var(fig, 0);
-  @var(index, [0], format=["1","a"]);
-  @var(val, 0);
-  # ... same @on rules as the built-in prelude ...
+# My custom prelude — Arabic numbering with short labels
+@def(numbering, format=["I","1"], content="{number}. ") {
+  # ... same body as built-in (with @arg references) ...
 }
-@use(numbering);
+@use(numbering, format=["1","a"]);
 @init(figure, label="Fig. {n}");
 @init(heading, label="§{n}");
 ```

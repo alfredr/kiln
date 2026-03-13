@@ -1,7 +1,10 @@
 use crate::ast::{Attrs, Document, Node, NodeKind, Value};
 
+#[cfg(feature = "syntax-highlight")]
 use syntect::highlighting::ThemeSet;
+#[cfg(feature = "syntax-highlight")]
 use syntect::html::highlighted_html_for_string;
+#[cfg(feature = "syntax-highlight")]
 use syntect::parsing::SyntaxSet;
 
 // ── Tag builder ──
@@ -337,6 +340,7 @@ fn render_code_block_inner(lang: &str, source: &str, out: &mut String) {
     out.push_str("</code></pre>");
 }
 
+#[cfg(feature = "syntax-highlight")]
 fn highlight_code(lang: &str, source: &str) -> Option<String> {
     let ss = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
@@ -353,6 +357,11 @@ fn highlight_code(lang: &str, source: &str) -> Option<String> {
         })
         .unwrap_or(&full);
     Some(inner.trim_start_matches('\n').to_string())
+}
+
+#[cfg(not(feature = "syntax-highlight"))]
+fn highlight_code(_lang: &str, _source: &str) -> Option<String> {
+    None
 }
 
 fn render_raw_block(format: &str, source: &str, attrs: &Attrs, out: &mut String) {

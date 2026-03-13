@@ -4,7 +4,7 @@ title: "Selectors"
 
 Selectors are patterns that match nodes in the document tree. They control which elements receive cascading properties from `@init` directives. The syntax draws from CSS, adapted for kiln's document model.
 
-## Simple Selectors
+## Simple Selectors {#sec:simple}
 
 ### Kind
 
@@ -45,6 +45,14 @@ Square brackets match on node attributes. Structural fields (like `level`, `lang
 
 `[preview]` without a value tests that the attribute exists (is set to any value).
 
+A `^=` prefix operator tests that the attribute value starts with a given string:
+
+```markdown
+{@init([lang=^"py"], theme="dark")}
+```
+
+This matches nodes whose `lang` attribute starts with `"py"` (e.g., `"python"`, `"python3"`).
+
 ### This
 
 The keyword `this` matches the element the init is attached to. Use it inside brace attributes.
@@ -53,7 +61,7 @@ The keyword `this` matches the element the init is attached to. Use it inside br
 ## Chapter One {#ch1 {@init(this, numbering=true)}}
 ```
 
-## Kind Name Registry
+## Kind Name Registry {#sec:kinds}
 
 Both descriptive kebab-case names and short aliases resolve to the same canonical kind.
 
@@ -81,8 +89,10 @@ Both descriptive kebab-case names and short aliases resolve to the same canonica
 | Image | `image` | `img` |
 | Citation | `citation` | `cite` |
 | CrossRef | `cross-ref` | `ref` |
+| Text | `text` | `t` |
+| Code (inline) | `code-inline` | `ic` |
 
-## Kind:ID Shorthand
+## Kind:ID Shorthand {#sec:shorthand}
 
 Combine a kind with a specific ID using colon syntax.
 
@@ -98,7 +108,7 @@ A wildcard `*` matches all nodes of that kind, making `fig:*` equivalent to bare
 {@init(fig:*, series="figs")}
 ```
 
-## Compound Selectors
+## Compound Selectors {#sec:compound}
 
 Chain simple selectors without spaces to require all parts match (AND).
 
@@ -110,7 +120,7 @@ Chain simple selectors without spaces to require all parts match (AND).
 
 `figure.wide` matches a node that is both kind Figure and has class `wide`.
 
-## Combinators
+## Combinators {#sec:combinators}
 
 ### Child: `>`
 
@@ -132,7 +142,7 @@ Matches a node that is a descendant at any depth of the left-hand node.
 
 This applies `border=true` to any Figure anywhere inside a Section.
 
-## Expression Algebra
+## Expression Algebra {#sec:algebra}
 
 Selectors support boolean AND and OR combinations using three operators with well-defined precedence.
 
@@ -207,7 +217,7 @@ When an attribute value is a tuple, the equality test distributes into an OR:
 
 This means: `(lang="rust" OR lang="python") AND preview`.
 
-## Structural Attributes
+## Structural Attributes {#sec:structural}
 
 Certain node fields are exposed as virtual attributes for selector matching.
 
@@ -231,7 +241,7 @@ A single init can set multiple properties. Separate them with commas after the s
 
 The boundary between selector and properties is the first top-level `key=value` token. Everything before it is the selector; everything after is properties.
 
-## Full Examples
+## Full Examples {#sec:examples}
 
 Apply a theme to all Rust code blocks:
 

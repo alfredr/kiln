@@ -2,7 +2,7 @@
 title: "Cross-References & Citations"
 ---
 
-## Cross-References
+## Cross-References {#sec:cross-refs}
 
 Reference any element in the document by its ID using the `@kind:label` syntax:
 
@@ -18,7 +18,7 @@ The reference links to the element whose `id` matches the full `kind:label` stri
 
 ### Reference Termination
 
-A cross-reference is terminated at the first character that is not alphanumeric, a hyphen, or an underscore. This means you can use references naturally within prose:
+A cross-reference is terminated at the first character that is not alphanumeric, a hyphen, an underscore, or a colon. Colons are allowed because the `kind:label` convention uses them. This means you can use references naturally within prose:
 
 ```markdown
 The value from @eq:quadratic, when substituted back, confirms the root.
@@ -40,7 +40,7 @@ When the target element belongs to a series with a `label` init, the label templ
 <a href="#fig:architecture">Figure 1</a>
 ```
 
-## Citations
+## Citations {#sec:citations}
 
 Cite sources using bracket syntax with `@` keys:
 

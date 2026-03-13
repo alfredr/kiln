@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kiln", "crates/kiln-doc"]
+members = ["crates/kiln", "crates/kiln-doc", "crates/kiln-doc-wasm"]
 
 [workspace.metadata.dylint]
 libraries = [

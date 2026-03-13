@@ -4,7 +4,7 @@ title: "Templates"
 
 kiln uses [Tera](https://keats.github.io/tera/), a Jinja2-like template engine for Rust. Templates control the HTML structure of every page on your site. They live in the `templates/` directory (configurable via `kiln.toml`) and use standard Tera syntax: `{{ variables }}`, `{% blocks %}`, `{# comments #}`, filters, and template inheritance.
 
-## Required Template Files
+## Required Template Files {#sec:required}
 
 kiln expects four template files in your `templates/` directory:
 
@@ -17,7 +17,7 @@ kiln expects four template files in your `templates/` directory:
 
 All four are required. `post.html`, `page.html`, and `index.html` typically extend `base.html` using Tera's `{% extends %}` mechanism.
 
-## Template Variables
+## Template Variables {#sec:variables}
 
 Every template receives a set of site-wide variables. Depending on the template, additional context-specific variables are also available.
 
@@ -63,7 +63,7 @@ In addition to site and navigation variables, `page.html` receives:
 
 The index template receives site and navigation variables only. Use `posts` and `pages` to build your homepage.
 
-## Tree Navigation
+## Tree Navigation {#sec:nav}
 
 The `nav_tree` variable provides a recursive tree structure for building hierarchical navigation (sidebars, breadcrumbs, table of contents). Each node has:
 
@@ -110,7 +110,7 @@ The `body` variable in `post.html` and `page.html` contains pre-rendered HTML. B
 {{ body }}
 ```
 
-## Example Templates
+## Example Templates {#sec:examples}
 
 ### `base.html`
 
@@ -222,7 +222,7 @@ The homepage template loops over all published posts:
 {% endblock %}
 ```
 
-## Customization
+## Customization {#sec:customization}
 
 Templates are fully yours to modify. kiln imposes no constraints beyond the four required files and the available variables. Here are some ideas:
 

@@ -6,6 +6,7 @@ author = ""
 
 [build]
 slug_pattern = "^\\d+-(.+)$"
+prelude = "prelude.kiln"
 
 [[hints]]
 kind = "CodeBlock"

@@ -4,6 +4,10 @@ use anyhow::Context;
 use typst::layout::PagedDocument;
 use typst_html::HtmlDocument;
 
+use kiln_doc::ast::{
+    Bind, CompoundSelector, Declaration, Document, Init, Selector, SelectorExpr, Value,
+};
+
 use crate::config::Config;
 use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
 use crate::template::{load_templates, render_index, render_page, render_post};
@@ -119,6 +123,8 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     let (declarations, mut inits) = kiln_doc::parse_prelude(&prelude_text);
     inits.extend(config_inits(&config.hints));
 
+    let prelude = Prelude { inits, declarations };
+
     // Compile the content tree
     compile_tree(
         config,
@@ -127,8 +133,7 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
         &output_dir,
         &compiler,
         &tree,
-        &inits,
-        &declarations,
+        &prelude,
     )?;
 
     // Generate index page
@@ -144,6 +149,11 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     Ok(())
 }
 
+struct Prelude {
+    inits: Vec<Init>,
+    declarations: Vec<Declaration>,
+}
+
 fn compile_tree(
     config: &Config,
     tera: &tera::Tera,
@@ -151,8 +161,7 @@ fn compile_tree(
     output_dir: &Path,
     compiler: &TypstCompiler,
     tree: &ContentTree,
-    inits: &[kiln_doc::ast::Init],
-    declarations: &[kiln_doc::ast::Declaration],
+    prelude: &Prelude,
 ) -> anyhow::Result<()> {
     // Collect child content directory names for asset isolation
     let child_dirs: Vec<&str> = node
@@ -182,8 +191,8 @@ fn compile_tree(
         };
 
         let mut inject = InjectPrelude {
-            inits: inits.to_vec(),
-            declarations: declarations.to_vec(),
+            inits: prelude.inits.clone(),
+            declarations: prelude.declarations.clone(),
         };
         let mut hoist = kiln_doc::resolve::HoistDirectives;
         let mut cascade = kiln_doc::resolve::CascadeInits;
@@ -212,43 +221,34 @@ fn compile_tree(
     }
 
     for child in &node.children {
-        compile_tree(config, tera, child, output_dir, compiler, tree, inits, declarations)?;
+        compile_tree(config, tera, child, output_dir, compiler, tree, prelude)?;
     }
 
     Ok(())
 }
 
-fn config_inits(configs: &[crate::config::HintConfig]) -> Vec<kiln_doc::ast::Init> {
-    use kiln_doc::ast::{Init, Value};
-
+fn config_inits(configs: &[crate::config::HintConfig]) -> Vec<Init> {
     configs
         .iter()
-        .flat_map(|cfg| {
-            let selector = parse_config_selector(cfg);
-            let Some(selector) = selector else {
-                return vec![];
-            };
-
-            cfg.properties
-                .iter()
-                .map(|(k, v)| Init {
-                    selector: selector.clone(),
-                    property: k.clone(),
-                    value: match v {
-                        toml::Value::Boolean(b) => Value::Bool(*b),
-                        toml::Value::Integer(n) => Value::Number(*n as f64),
-                        toml::Value::Float(n) => Value::Number(*n),
-                        toml::Value::String(s) => Value::Text(s.clone()),
-                        other => Value::Text(other.to_string()),
-                    },
-                })
-                .collect()
+        .filter_map(|cfg| {
+            let selector = selector_from_hint(cfg)?;
+            Some(cfg.properties.iter().map(move |(k, v)| Init {
+                selector: selector.clone(),
+                property: k.clone(),
+                value: Bind::Val(match v {
+                    toml::Value::Boolean(b) => Value::Bool(*b),
+                    toml::Value::Integer(n) => Value::Number(*n as f64),
+                    toml::Value::Float(n) => Value::Number(*n),
+                    toml::Value::String(s) => Value::Text(s.clone()),
+                    other => Value::Text(other.to_string()),
+                }),
+            }))
         })
+        .flatten()
         .collect()
 }
 
-fn parse_config_selector(cfg: &crate::config::HintConfig) -> Option<kiln_doc::ast::Selector> {
-    use kiln_doc::ast::{CompoundSelector, Selector, SelectorExpr};
+fn selector_from_hint(cfg: &crate::config::HintConfig) -> Option<Selector> {
 
     if let Some(sel_str) = &cfg.selector {
         let sel = kiln_doc::selector::parse_selector(sel_str);
@@ -270,23 +270,22 @@ fn parse_config_selector(cfg: &crate::config::HintConfig) -> Option<kiln_doc::as
             ..Default::default()
         })));
     }
-    if let Some(id) = &cfg.id {
-        return Some(Selector::Expr(SelectorExpr::Simple(CompoundSelector {
+    cfg.id.as_ref().map(|id| {
+        Selector::Expr(SelectorExpr::Simple(CompoundSelector {
             id: Some(id.clone()),
             ..Default::default()
-        })));
-    }
-    None
+        }))
+    })
 }
 
 /// Pass that injects prelude declarations and config-level inits onto the document root.
 struct InjectPrelude {
-    inits: Vec<kiln_doc::ast::Init>,
-    declarations: Vec<kiln_doc::ast::Declaration>,
+    inits: Vec<Init>,
+    declarations: Vec<Declaration>,
 }
 
 impl kiln_doc::visit::Pass for InjectPrelude {
-    fn run(&mut self, doc: &mut kiln_doc::ast::Document) {
+    fn run(&mut self, doc: &mut Document) {
         doc.content.attrs.inits.extend(self.inits.iter().cloned());
         doc.content
             .attrs
@@ -525,7 +524,7 @@ mod tests {
         let hints = config_inits(&[cfg]);
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].property, "numbering");
-        assert!(matches!(&hints[0].value, kiln_doc::ast::Value::Bool(true)));
+        assert!(matches!(hints[0].value.val(), kiln_doc::ast::Value::Bool(true)));
     }
 
     #[test]
@@ -601,10 +600,10 @@ mod tests {
         assert_eq!(hints.len(), 4);
 
         let find = |name: &str| hints.iter().find(|h| h.property == name).unwrap();
-        assert!(matches!(&find("flag").value, Value::Bool(false)));
-        assert!(matches!(&find("count").value, Value::Number(n) if *n == 42.0));
-        assert!(matches!(&find("ratio").value, Value::Number(n) if (*n - 1.23).abs() < 0.001));
-        assert!(matches!(&find("label").value, Value::Text(s) if s == "hello"));
+        assert!(matches!(find("flag").value.val(), Value::Bool(false)));
+        assert!(matches!(find("count").value.val(), Value::Number(n) if *n == 42.0));
+        assert!(matches!(find("ratio").value.val(), Value::Number(n) if (*n - 1.23).abs() < 0.001));
+        assert!(matches!(find("label").value.val(), Value::Text(s) if s == "hello"));
     }
 
     #[test]

@@ -1,12 +1,15 @@
 # Standard numbering definitions
 #
 # Defines hierarchical section numbering and flat figure numbering.
-# Documents opt in to visible numbering with @content(heading, "{number}. ")
-# or by adding numbering=true to individual elements.
+# Heading numbers are prepended automatically via @content.
+#
+# Parameters:
+#   format  — number format tokens per depth, e.g. ["I","1"] for Roman/Arabic
+#   content — template prepended to headings, e.g. "{number}. "
 
-@def(numbering) {
+@def(numbering, format=["I","1"], content="{number}. ") {
   @var(fig, 0);
-  @var(index, [0], format=["I","1"]);
+  @var(index, [0], format=@arg(format));
   @var(val, 0);
 
   @on(enter, section > section) {
@@ -30,6 +33,8 @@
     @inc(fig);
     @store(number, fig);
   }
+
+  @content(heading, @arg(content));
 }
 
 @use(numbering);

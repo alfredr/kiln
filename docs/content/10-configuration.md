@@ -4,7 +4,7 @@ title: "Configuration"
 
 kiln is configured through a single file, `kiln.toml`, placed at the root of your project. This file uses [TOML](https://toml.io/) syntax and has two sections: `[site]` for metadata and `[build]` for directory layout. Command-line flags provide additional runtime options.
 
-## The `[site]` Section
+## The `[site]` Section {#sec:site}
 
 The `[site]` section defines your site's metadata. These values are passed to every template as variables.
 
@@ -17,7 +17,7 @@ The `[site]` section defines your site's metadata. These values are passed to ev
 
 Only `title` is required. The rest have sensible defaults for local development. When deploying, you should set `url` to your production domain.
 
-## The `[build]` Section
+## The `[build]` Section {#sec:build}
 
 The `[build]` section controls where kiln looks for source files and where it writes output. This entire section is optional — if omitted, all fields use their defaults.
 
@@ -28,6 +28,7 @@ The `[build]` section controls where kiln looks for source files and where it wr
 | `template_dir` | `"templates"` | Directory containing Tera template files      |
 | `static_dir`   | `"static"`    | Static assets copied verbatim to output root  |
 | `slug_pattern` | —             | Regex to transform filenames into slugs       |
+| `prelude`      | built-in      | Path to a custom `.kiln` prelude file          |
 
 All paths are relative to the project root. The content directory is scanned recursively — subdirectories create hierarchical content sections.
 
@@ -45,7 +46,7 @@ This is useful for controlling filesystem sort order (via numeric prefixes) whil
 
 Sections can override the pattern for their children by setting `section_slug_pattern` in the section's `index.md` frontmatter.
 
-## CLI Flags
+## CLI Flags {#sec:cli}
 
 kiln's command-line interface provides flags that override or supplement the configuration file.
 
@@ -79,7 +80,7 @@ kiln dev --drafts
 kiln dev --port 8080
 ```
 
-## Complete Annotated Example
+## Complete Annotated Example {#sec:full-example}
 
 Here is a `kiln.toml` with every available option and comments explaining each one:
 
@@ -115,6 +116,9 @@ static_dir = "static"
 # Regex to transform filenames into slugs (first capture group is used)
 # This strips numeric prefixes used for ordering
 slug_pattern = "^\\d+-(.+)$"
+
+# Path to a custom .kiln prelude file (replaces the built-in prelude)
+# prelude = "my-prelude.kiln"
 ```
 
 ## Minimal Example

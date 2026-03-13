@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kiln model explorer</title>
+  <link rel="stylesheet" href="explorer.css">
+</head>
+<body>
+  <header>
+    <h1>kiln model explorer</h1>
+    <div class="controls">
+      <select id="scenario">
+        <option value="headings">Heading numbering</option>
+        <option value="figures">Figure series</option>
+        <option value="def-use">Multi-level numbering</option>
+        <option value="inits">Init cascade</option>
+        <option value="crossrefs">Cross-references</option>
+        <option value="click">Click counter</option>
+      </select>
+      <button id="parse-btn">Parse</button>
+      <button id="live-btn">Live</button>
+    </div>
+  </header>
+
+  <div class="main-row">
+    <section class="panel editor-panel">
+      <div class="panel-header">Input</div>
+      <textarea id="editor" spellcheck="false"></textarea>
+    </section>
+
+    <section class="panel tree-panel">
+      <div class="panel-header">
+        AST <span id="stage-label"></span>
+      </div>
+      <div id="selector-bar" class="selector-bar">
+        <input id="selector-input" type="text" placeholder="selector..." spellcheck="false">
+        <div id="selector-chips" class="selector-chips"></div>
+      </div>
+      <div id="tree-container">
+        <svg id="tree-svg"></svg>
+      </div>
+    </section>
+
+    <section class="panel right-panel">
+      <div class="panel-header">Document</div>
+      <div id="doc-preview" class="doc-preview"></div>
+      <div id="state-panel">
+        <div class="panel-header">State</div>
+        <div id="state-content"></div>
+      </div>
+      <div id="detail-section">
+        <div class="panel-header">Inspector</div>
+        <div id="event-detail"></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="timeline-panel">
+    <div class="panel-header">
+      Timeline
+      <span class="timeline-controls">
+        <button id="prev-btn" title="Previous">&larr;</button>
+        <span id="event-counter">0 / 0</span>
+        <button id="next-btn" title="Next">&rarr;</button>
+      </span>
+    </div>
+    <div id="timeline" class="timeline-list"></div>
+  </section>
+
+  <script type="module" src="explorer.js"></script>
+</body>
+</html>
