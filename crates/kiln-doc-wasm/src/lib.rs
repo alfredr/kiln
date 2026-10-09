@@ -9,9 +9,13 @@ use kiln_doc::resolve::{
 use kiln_doc::selector::{self, NodeSnapshot};
 use kiln_doc::visit::Pass;
 
+mod typst_world;
+use typst_world::WasmTypstWorld;
+
 thread_local! {
     static LAST_TRACE: RefCell<Option<Trace>> = const { RefCell::new(None) };
     static LIVE: RefCell<Option<(Document, Runtime)>> = const { RefCell::new(None) };
+    static TYPST_WORLD: RefCell<Option<WasmTypstWorld>> = const { RefCell::new(None) };
 }
 
 /// Parse kiln markup and return a full execution trace as JSON.
@@ -126,5 +130,81 @@ pub fn dispatch_event(event: &str, node_id: &str) -> String {
             "ast": doc,
         })
         .to_string()
+    })
+}
+
+// --- Typst compilation ---
+
+/// Initialize a Typst compilation world from `source` with an optional preamble.
+///
+/// `format_config_json` is a JSON object: `{ "preamble": "...", "output": "typst" }`.
+/// Call `add_typst_package_file` to register package files, then `compile_typst` to compile.
+/// Returns `"ok"` or `{ "error": "..." }`.
+#[wasm_bindgen]
+pub fn compile_typst_init(source: &str, format_config_json: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct FormatConfig {
+        #[serde(default)]
+        preamble: String,
+    }
+
+    let config: FormatConfig = match serde_json::from_str(format_config_json) {
+        Ok(c) => c,
+        Err(e) => return serde_json::json!({ "error": format!("{e}") }).to_string(),
+    };
+
+    let full_source = if config.preamble.is_empty() {
+        format!("#set page(width: auto, height: auto, margin: 0pt)\n{source}")
+    } else {
+        format!(
+            "{}\n#set page(width: auto, height: auto, margin: 0pt)\n{source}",
+            config.preamble
+        )
+    };
+
+    let world = WasmTypstWorld::from_source(&full_source);
+    TYPST_WORLD.with(|cell| *cell.borrow_mut() = Some(world));
+    "ok".to_string()
+}
+
+/// Register a single package file into the active Typst world.
+///
+/// `pkg_path` must be `"namespace/name/version/relative/path"`,
+/// e.g. `"preview/fletcher/0.5.7/lib.typ"`.
+/// Returns `"ok"` or `{ "error": "..." }`.
+#[wasm_bindgen]
+pub fn add_typst_package_file(pkg_path: &str, data: &[u8]) -> String {
+    TYPST_WORLD.with(|cell| {
+        let borrow = cell.borrow();
+        match borrow.as_ref() {
+            None => serde_json::json!({ "error": "no active typst world" }).to_string(),
+            Some(world) => {
+                world.add_package_file(pkg_path.to_string(), data.to_vec());
+                "ok".to_string()
+            }
+        }
+    })
+}
+
+/// Compile the active Typst world and return an SVG string.
+///
+/// Returns the SVG markup, or `{ "error": "..." }` on failure.
+#[wasm_bindgen]
+pub fn compile_typst() -> String {
+    use typst::layout::PagedDocument;
+    TYPST_WORLD.with(|cell| {
+        let borrow = cell.borrow();
+        let world = match borrow.as_ref() {
+            None => return serde_json::json!({ "error": "no active typst world" }).to_string(),
+            Some(w) => w,
+        };
+        let typst::diag::Warned { output, .. } = typst::compile::<PagedDocument>(world);
+        match output {
+            Ok(doc) => typst_svg::svg_merged(&doc, typst::layout::Abs::zero()),
+            Err(errs) => {
+                let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
+                serde_json::json!({ "error": msgs.join("; ") }).to_string()
+            }
+        }
     })
 }

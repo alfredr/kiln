@@ -11,6 +11,30 @@ pub struct Config {
     pub build: BuildConfig,
     #[serde(default)]
     pub hints: Vec<HintConfig>,
+    #[serde(default)]
+    pub typst: TypstConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct TypstConfig {
+    #[serde(default)]
+    pub formats: Vec<TypstFormatConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TypstFormatConfig {
+    /// The format name used in `{=feynman}` blocks.
+    pub name: String,
+    /// Which Typst output pipeline: `"typst"` (SVG) or `"typst-html"`.
+    #[serde(default = "default_typst_output")]
+    pub output: String,
+    /// Typst source lines injected before user content.
+    #[serde(default)]
+    pub preamble: String,
+}
+
+fn default_typst_output() -> String {
+    "typst".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +112,10 @@ fn default_static_dir() -> PathBuf {
 }
 
 impl Config {
+    pub fn typst_format(&self, name: &str) -> Option<&TypstFormatConfig> {
+        self.typst.formats.iter().find(|f| f.name == name)
+    }
+
     pub fn load(project_root: &Path) -> anyhow::Result<Self> {
         let path = project_root.join("kiln.toml");
         let text = std::fs::read_to_string(&path)
@@ -191,5 +219,52 @@ mod tests {
 
         let config = Config::load(tmp.path()).unwrap();
         assert!(config.build.prelude.is_none());
+    }
+
+    #[test]
+    fn load_typst_format_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("kiln.toml"),
+            "[site]\ntitle = \"Test\"\n\n[[typst.formats]]\nname = \"feynman\"\noutput = \"typst\"\npreamble = '#import \"@preview/fletcher:0.5.7\": diagram'\n",
+        )
+        .unwrap();
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(config.typst.formats.len(), 1);
+        let f = &config.typst.formats[0];
+        assert_eq!(f.name, "feynman");
+        assert_eq!(f.output, "typst");
+        assert!(f.preamble.contains("fletcher"));
+    }
+
+    #[test]
+    fn load_config_without_typst_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("kiln.toml"), "[site]\ntitle = \"T\"\n").unwrap();
+        let config = Config::load(tmp.path()).unwrap();
+        assert!(config.typst.formats.is_empty());
+    }
+
+    #[test]
+    fn typst_format_lookup() {
+        let config = Config {
+            site: SiteConfig {
+                title: "t".into(),
+                url: "http://localhost".into(),
+                description: String::new(),
+                author: String::new(),
+            },
+            build: BuildConfig::default(),
+            hints: vec![],
+            typst: TypstConfig {
+                formats: vec![TypstFormatConfig {
+                    name: "feynman".into(),
+                    output: "typst".into(),
+                    preamble: "#import \"@preview/fletcher:0.5.7\": diagram".into(),
+                }],
+            },
+        };
+        assert!(config.typst_format("feynman").is_some());
+        assert!(config.typst_format("unknown").is_none());
     }
 }

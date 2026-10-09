@@ -8,7 +8,7 @@ use kiln_doc::ast::{
     Bind, CompoundSelector, Declaration, Document, Init, Selector, SelectorExpr, Value,
 };
 
-use crate::config::Config;
+use crate::config::{Config, TypstConfig};
 use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
 use crate::template::{load_templates, render_index, render_page, render_post};
 use crate::world::KilnWorld;
@@ -18,25 +18,46 @@ const BUILTIN_PRELUDE: &str = include_str!("prelude.kiln");
 /// A RawBlockCompiler that compiles Typst blocks using KilnWorld.
 struct TypstCompiler<'a> {
     project_root: &'a Path,
+    typst_config: &'a TypstConfig,
 }
 
 impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
     fn compile(&self, format: &str, source: &str) -> Result<String, String> {
+        // Passthrough formats
         match format {
             "html" => return Ok(source.to_string()),
             "mermaid" => {
                 return mermaid_rs_renderer::render(source)
                     .map_err(|e| format!("mermaid rendering failed: {e}"));
             }
-            "typst" | "typst-html" => {}
-            _ => return Err(format!("unsupported raw block format: {format}")),
+            _ => {}
         }
-        let wrapped = format!("#set page(width: auto, height: auto, margin: 0pt)\n{source}");
+
+        // Resolve output mode and effective source (with preamble if an alias).
+        let (output_mode, effective_source): (&str, String) = match format {
+            "typst" | "typst-html" => (format, source.to_string()),
+            _ => match self.typst_config.formats.iter().find(|f| f.name == format) {
+                Some(alias) => {
+                    let src = if alias.preamble.is_empty() {
+                        source.to_string()
+                    } else {
+                        format!("{}\n{}", alias.preamble, source)
+                    };
+                    (alias.output.as_str(), src)
+                }
+                None => return Err(format!("unsupported raw block format: {format}")),
+            },
+        };
+
+        // Preamble comes first, then the auto-sizing page rule, then content.
+        let wrapped = format!(
+            "#set page(width: auto, height: auto, margin: 0pt)\n{effective_source}"
+        );
 
         let world = KilnWorld::from_source(&wrapped, self.project_root)
             .map_err(|e| format!("failed to create typst world: {e}"))?;
 
-        if format == "typst-html" {
+        if output_mode == "typst-html" {
             return self.compile_typst_html(&world);
         }
 
@@ -112,7 +133,7 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
         copy_dir_recursive(&static_dir, &output_dir)?;
     }
 
-    let compiler = TypstCompiler { project_root };
+    let compiler = TypstCompiler { project_root, typst_config: &config.typst };
 
     // Load prelude (built-in or custom) and merge with config inits
     let prelude_text = match config.build.prelude.as_deref() {
@@ -376,11 +397,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::TypstFormatConfig;
     use kiln_doc::ast::RawBlockCompiler;
+
+    static EMPTY_TYPST_CONFIG: TypstConfig = TypstConfig { formats: vec![] };
 
     fn compiler() -> TypstCompiler<'static> {
         TypstCompiler {
             project_root: Path::new("/tmp"),
+            typst_config: &EMPTY_TYPST_CONFIG,
         }
     }
 
@@ -624,5 +649,42 @@ mod tests {
         );
         let hints = config_inits(&[cfg1, cfg2]);
         assert_eq!(hints.len(), 2);
+    }
+
+    fn compiler_with_alias(name: &str, preamble: &str, output: &str) -> TypstCompiler<'static> {
+        let config = Box::leak(Box::new(TypstConfig {
+            formats: vec![TypstFormatConfig {
+                name: name.to_string(),
+                output: output.to_string(),
+                preamble: preamble.to_string(),
+            }],
+        }));
+        TypstCompiler { project_root: Path::new("/tmp"), typst_config: config }
+    }
+
+    #[test]
+    fn typst_compiler_rejects_unknown_with_no_aliases() {
+        let c = compiler();
+        let result = c.compile("latex", "\\frac{1}{2}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsupported"));
+    }
+
+    #[test]
+    fn typst_compiler_named_alias_not_rejected_as_unsupported() {
+        // "feynman" alias should not be rejected as unsupported format.
+        let c = compiler_with_alias("feynman", "", "typst");
+        let result = c.compile("feynman", "#rect()");
+        if let Err(e) = &result {
+            assert!(!e.contains("unsupported"), "alias should not be unsupported: {e}");
+        }
+    }
+
+    #[test]
+    fn typst_compiler_unknown_with_alias_present_still_rejects_others() {
+        let c = compiler_with_alias("feynman", "", "typst");
+        let result = c.compile("latex", "hi");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unsupported"));
     }
 }

@@ -19,6 +19,8 @@
         <li{% if path is defined and page.path == path %} class="active"{% endif %}><a href="/{{ page.path }}/">{{ page.title }}</a></li>
         {% endfor %}
       </ol>
+      <a href="/explorer/" class="sidebar-link">Explorer</a>
+      <a href="/playground/" class="sidebar-link">Playground</a>
     </nav>
   </aside>
   <main>

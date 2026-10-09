@@ -15,3 +15,9 @@ preview = true
 [[hints]]
 kind = "RawBlock"
 preview = true
+
+[[typst.formats]]
+name = "fletcher"
+output = "typst"
+preamble = """
+#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge"""

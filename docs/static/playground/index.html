@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Typst Playground</title>
+  <link rel="stylesheet" href="playground.css">
+</head>
+<body>
+  <header>
+    <h1>Typst Playground</h1>
+    <a href="/" class="back-link">docs</a>
+  </header>
+
+  <div class="toolbar">
+    <button id="compile-btn" disabled>Loading WASM...</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="panels">
+    <div class="editor-panel">
+      <label for="preamble">Preamble</label>
+      <textarea id="preamble" spellcheck="false">#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge</textarea>
+
+      <label for="source">Source</label>
+      <textarea id="source" spellcheck="false">#diagram(
+  node-stroke: none,
+  edge-stroke: 0.8pt,
+  spacing: (3em, 2em),
+
+  node((0, 0), $e^-$),
+  node((2, 0), $e^-$),
+  node((0, 2), $e^+$),
+  node((2, 2), $e^+$),
+
+  edge((0, 0), (1, 1), "-|>-", label: $gamma$),
+  edge((1, 1), (2, 0), "-|>-"),
+  edge((0, 2), (1, 1), "-|>-"),
+  edge((1, 1), (2, 2), "-|>-", label: $gamma$),
+)</textarea>
+    </div>
+
+    <div class="output-panel">
+      <div id="output" class="output-area">
+        <span class="placeholder">Output will appear here</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="playground.js"></script>
+</body>
+</html>

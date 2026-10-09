@@ -226,6 +226,7 @@ mod tests {
             },
             build: crate::config::BuildConfig::default(),
             hints: vec![],
+            typst: Default::default(),
         }
     }
 

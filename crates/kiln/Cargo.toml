@@ -13,7 +13,7 @@ kiln-doc = { path = "../kiln-doc" }
 typst = "0.14"
 typst-html = "0.14"
 typst-svg = "0.14"
-typst-kit = { version = "0.14", features = ["embed-fonts", "fonts"] }
+typst-kit = { version = "0.14", features = ["embed-fonts", "fonts", "packages"] }
 typst-library = "0.14"
 typst-syntax = "0.14"
 

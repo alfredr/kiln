@@ -10,6 +10,7 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt, World};
 use typst_kit::fonts::{FontSearcher, FontSlot, Fonts};
+use typst_kit::package::PackageStorage;
 
 pub struct KilnWorld {
     library: LazyHash<Library>,
@@ -19,12 +20,21 @@ pub struct KilnWorld {
     root: PathBuf,
     sources: Mutex<HashMap<FileId, Source>>,
     files: Mutex<HashMap<FileId, Bytes>>,
+    packages: PackageStorage,
+}
+
+struct NoopProgress;
+impl typst_kit::download::Progress for NoopProgress {
+    fn print_start(&mut self) {}
+    fn print_progress(&mut self, _: &typst_kit::download::DownloadState) {}
+    fn print_finish(&mut self, _: &typst_kit::download::DownloadState) {}
 }
 
 impl KilnWorld {
     /// Create a world from an in-memory source string.
     pub fn from_source(source_text: &str, root: &Path) -> anyhow::Result<Self> {
-        let root = root.canonicalize()?;
+        // Use the path as-is; canonicalize() would fail on virtual/temp paths.
+        let root = root.to_path_buf();
         let vpath = VirtualPath::new("__inline__.typ");
         let main_id = FileId::new(None, vpath);
 
@@ -33,6 +43,12 @@ impl KilnWorld {
             .build();
 
         let Fonts { book, fonts } = FontSearcher::new().search();
+
+        let packages = PackageStorage::new(
+            None,
+            None,
+            typst_kit::download::Downloader::new("kiln/0.1"),
+        );
 
         let mut sources = HashMap::new();
         sources.insert(main_id, Source::new(main_id, source_text.to_string()));
@@ -45,14 +61,17 @@ impl KilnWorld {
             root,
             sources: Mutex::new(sources),
             files: Mutex::new(HashMap::new()),
+            packages,
         })
     }
 
     fn resolve_path(&self, id: FileId) -> FileResult<PathBuf> {
         if let Some(package) = id.package() {
-            return Err(FileError::Package(typst::diag::PackageError::NotFound(
-                package.clone(),
-            )));
+            let pkg_dir = self
+                .packages
+                .prepare_package(package, &mut NoopProgress)
+                .map_err(FileError::Package)?;
+            return id.vpath().resolve(&pkg_dir).ok_or(FileError::AccessDenied);
         }
 
         let vpath = id.vpath();

@@ -163,6 +163,57 @@ flowchart LR
 
 kiln compiles Mermaid diagrams to inline SVG at build time using a native Rust renderer. No client-side JavaScript is required — the diagram is embedded directly in the page, just like Typst blocks.
 
+## Custom Format Aliases {#sec:aliases}
+
+You can define custom format aliases in `kiln.toml` to import Typst packages automatically. For example, a `fletcher` alias for Feynman diagrams:
+
+```toml
+[[typst.formats]]
+name = "fletcher"
+output = "typst"
+preamble = '#import "@preview/fletcher:0.5.8" as fletcher: diagram, node, edge'
+```
+
+Then use it with `{=fletcher}`:
+
+````
+```{=fletcher}
+#diagram(
+  node-stroke: none,
+  edge-stroke: 0.8pt,
+  spacing: (3em, 2em),
+  node((0, 0), $e^-$),
+  node((2, 0), $e^-$),
+  node((0, 2), $e^+$),
+  node((2, 2), $e^+$),
+  edge((0, 0), (1, 1), "-|>-", label: $gamma$),
+  edge((1, 1), (2, 0), "-|>-"),
+  edge((0, 2), (1, 1), "-|>-"),
+  edge((1, 1), (2, 2), "-|>-", label: $gamma$),
+)
+```
+````
+
+This produces:
+
+```{=fletcher}
+#diagram(
+  node-stroke: none,
+  edge-stroke: 0.8pt,
+  spacing: (3em, 2em),
+  node((0, 0), $e^-$),
+  node((2, 0), $e^-$),
+  node((0, 2), $e^+$),
+  node((2, 2), $e^+$),
+  edge((0, 0), (1, 1), "-|>-", label: $gamma$),
+  edge((1, 1), (2, 0), "-|>-"),
+  edge((0, 2), (1, 1), "-|>-"),
+  edge((1, 1), (2, 2), "-|>-", label: $gamma$),
+)
+```
+
+The alias prepends the `preamble` (the `#import` line) before your content, so you write only the diagram code. kiln downloads the package on first build and caches it locally.
+
 ## Behavior Without a Compiler {#sec:no-compiler}
 
 When kiln encounters a raw block but no compiler is available for it, the block falls back to a `<pre>` element with a `data-format` attribute:
