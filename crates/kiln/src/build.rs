@@ -120,7 +120,8 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
 
     let tree = discover_content(&content_dir, include_drafts, slug_re.as_ref())?;
 
-    let tera = load_templates(&template_dir)?;
+    let data_dir = project_root.join(&config.build.data_dir);
+    let tera = load_templates(&template_dir, &data_dir, &static_dir)?;
 
     // Clean and recreate output directory
     if output_dir.exists() {

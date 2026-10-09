@@ -128,15 +128,32 @@ pub(super) fn apply_brace_attrs(attrs: &mut Attrs, content: &str) {
     }
 }
 
-/// Check the last child for trailing brace attrs and apply to parent or preceding node.
-pub(super) fn maybe_extract_trailing_attrs_from_children(children: &mut Vec<Node>) {
-    let Some((attr_str, before)) = extract_trailing_brace_from_last_child(children) else {
-        return;
-    };
+/// Check the last child for trailing brace attrs and apply them.
+///
+/// A brace after an inline node (`[link](url) {.btn}`, `*em*{.x}`) applies to
+/// that node. A brace on its own final line, or with only plain text before
+/// it, has no inline node to attach to and belongs to the enclosing block: its
+/// attribute string is returned for the caller to apply.
+pub(super) fn maybe_extract_trailing_attrs_from_children(
+    children: &mut Vec<Node>,
+) -> Option<String> {
+    let (attr_str, before) = extract_trailing_brace_from_last_child(children)?;
     if before.is_empty() {
         children.pop();
-        if let Some(prev) = children.last_mut() {
-            apply_brace_attrs(&mut prev.attrs, &attr_str);
+        if matches!(
+            children.last().map(|n| &n.kind),
+            Some(NodeKind::SoftBreak | NodeKind::HardBreak)
+        ) {
+            // Brace on its own line: drop the break and attach to the block.
+            children.pop();
+            return Some(attr_str);
+        }
+        match children.last_mut() {
+            Some(prev) => {
+                apply_brace_attrs(&mut prev.attrs, &attr_str);
+                None
+            }
+            None => Some(attr_str),
         }
     } else {
         *children.last_mut().expect("children non-empty") = Node::text(before);
@@ -147,6 +164,9 @@ pub(super) fn maybe_extract_trailing_attrs_from_children(children: &mut Vec<Node
                 &mut head.last_mut().expect("head non-empty").attrs,
                 &attr_str,
             );
+            None
+        } else {
+            Some(attr_str)
         }
     }
 }

@@ -58,6 +58,9 @@ pub struct BuildConfig {
     pub template_dir: PathBuf,
     #[serde(default = "default_static_dir")]
     pub static_dir: PathBuf,
+    /// Directory of TOML/YAML/JSON files readable from templates via `load_data`.
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
     #[serde(default)]
     pub slug_pattern: Option<String>,
     /// Path to a custom `.kiln` prelude file. Omit to use the built-in prelude.
@@ -86,6 +89,7 @@ impl Default for BuildConfig {
             output_dir: default_output_dir(),
             template_dir: default_template_dir(),
             static_dir: default_static_dir(),
+            data_dir: default_data_dir(),
             slug_pattern: None,
             prelude: None,
         }
@@ -109,6 +113,9 @@ fn default_template_dir() -> PathBuf {
 }
 fn default_static_dir() -> PathBuf {
     "static".into()
+}
+fn default_data_dir() -> PathBuf {
+    "data".into()
 }
 
 impl Config {

@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use axum::Router;
+use axum::http::{HeaderValue, header};
 use notify_debouncer_mini::new_debouncer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_livereload::LiveReloadLayer;
 
 use crate::build;
@@ -27,10 +30,16 @@ pub async fn dev(
     let livereload = LiveReloadLayer::new();
     let reloader = livereload.reloader();
 
-    // Serve dist/ with livereload injection
+    // Serve dist/ with livereload injection. `no-cache` makes the browser
+    // revalidate every file on reload; otherwise it heuristically caches
+    // stylesheets and keeps showing stale CSS after a rebuild.
     let app = Router::new()
         .fallback_service(ServeDir::new(&output_dir))
-        .layer(livereload);
+        .layer(livereload)
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ));
 
     // Rebuild channel — bounded(1) coalesces rapid changes
     let (rebuild_tx, rebuild_rx) = mpsc::sync_channel::<()>(1);
@@ -49,6 +58,7 @@ pub async fn dev(
         &config.build.content_dir,
         &config.build.template_dir,
         &config.build.static_dir,
+        &config.build.data_dir,
     ]
     .iter()
     .map(|d| root.join(d))
@@ -56,12 +66,19 @@ pub async fn dev(
     .collect();
 
     let tx = rebuild_tx.clone();
+    let mut changes = ChangeFilter::baseline(&watch_dirs);
     let mut debouncer = new_debouncer(
         Duration::from_millis(300),
         move |res: notify_debouncer_mini::DebounceEventResult| {
-            if let Ok(events) = res
-                && !events.is_empty()
-            {
+            let Ok(events) = res else { return };
+            let mut changed = false;
+            for event in &events {
+                if changes.changed(&event.path) {
+                    eprintln!("  changed: {}", event.path.display());
+                    changed = true;
+                }
+            }
+            if changed {
                 let _ = tx.try_send(());
             }
         },
@@ -93,6 +110,46 @@ pub async fn dev(
     Ok(())
 }
 
+/// Filters file events down to real changes. On macOS, FSEvents keeps
+/// reporting static files every time a build copies them, even though their
+/// contents are untouched; acting on those events rebuilds (and reloads the
+/// browser) in an endless loop. A path counts as changed only when its
+/// modification time or size differs from the last time we saw it.
+struct ChangeFilter {
+    seen: HashMap<PathBuf, (SystemTime, u64)>,
+}
+
+impl ChangeFilter {
+    fn baseline(roots: &[PathBuf]) -> Self {
+        let seen = roots
+            .iter()
+            .flat_map(|root| walkdir::WalkDir::new(root).into_iter().filter_map(Result::ok))
+            .filter_map(|entry| {
+                let path = entry.into_path();
+                fingerprint(&path).map(|f| (path, f))
+            })
+            .collect();
+        Self { seen }
+    }
+
+    fn changed(&mut self, path: &Path) -> bool {
+        let now = fingerprint(path);
+        if now == self.seen.get(path).copied() {
+            return false;
+        }
+        match now {
+            Some(f) => self.seen.insert(path.to_path_buf(), f),
+            None => self.seen.remove(path),
+        };
+        true
+    }
+}
+
+fn fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
 fn rebuild_loop(
     rx: mpsc::Receiver<()>,
     root: &Path,
@@ -122,5 +179,34 @@ fn rebuild_loop(
 
         // Drain pending signals
         while rx.try_recv().is_ok() {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_filter_ignores_events_without_real_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let css = tmp.path().join("main.css");
+        std::fs::write(&css, "a {}").unwrap();
+
+        let mut filter = ChangeFilter::baseline(&[tmp.path().to_path_buf()]);
+        assert!(!filter.changed(&css), "untouched file reported as changed");
+
+        std::fs::write(&css, "a { color: red }").unwrap();
+        assert!(filter.changed(&css));
+        assert!(!filter.changed(&css), "same change reported twice");
+
+        // A temp file that appeared and vanished between events is not a change.
+        assert!(!filter.changed(&tmp.path().join("main.css.tmp.123")));
+
+        let new = tmp.path().join("new.css");
+        std::fs::write(&new, "b {}").unwrap();
+        assert!(filter.changed(&new));
+
+        std::fs::remove_file(&css).unwrap();
+        assert!(filter.changed(&css));
     }
 }

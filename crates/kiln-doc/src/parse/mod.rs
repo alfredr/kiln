@@ -164,12 +164,17 @@ fn parse_inlines_in_blocks(blocks: Vec<RawBlock>) -> Vec<Node> {
                 // Extract trailing brace attrs before figure promotion, so
                 // `![alt](url){#id}` gets the attrs applied to the Image node
                 // and is then eligible for promotion.
-                maybe_extract_trailing_attrs_from_children(&mut children);
+                let block_attrs = maybe_extract_trailing_attrs_from_children(&mut children);
                 // Figure promotion: paragraph with single image
-                if is_single_image(&children) {
-                    return Some(promote_to_figure(children));
+                let mut node = if is_single_image(&children) {
+                    promote_to_figure(children)
+                } else {
+                    Node::paragraph(children)
+                };
+                if let Some(attr_str) = block_attrs {
+                    apply_brace_attrs(&mut node.attrs, &attr_str);
                 }
-                Some(Node::paragraph(children))
+                Some(node)
             }
             RawBlock::CodeBlock { source, attrs } => {
                 let (raw_format, rest) = extract_raw_format(attrs.as_deref());
@@ -734,6 +739,31 @@ mod tests {
             .find(|n| matches!(n.kind, NodeKind::Link { .. }));
         assert!(link.is_some());
         assert!(link.unwrap().attrs.classes.contains(&"btn".to_string()));
+    }
+
+    #[test]
+    fn paragraph_attrs_on_own_line() {
+        let doc = parse_ok("[a](x)\n[b](y)\n{.links}");
+        let para = &doc.content.children[0];
+        assert!(matches!(para.kind, NodeKind::Paragraph));
+        assert!(para.attrs.classes.contains(&"links".to_string()));
+        // The links keep no class, and the break before the brace is gone.
+        assert!(para.children.iter().all(|n| n.attrs.classes.is_empty()));
+        assert!(!matches!(
+            para.children.last().map(|n| &n.kind),
+            Some(NodeKind::SoftBreak)
+        ));
+    }
+
+    #[test]
+    fn paragraph_attrs_after_plain_text() {
+        let doc = parse_ok("This paragraph has special styling. {.callout}");
+        let para = &doc.content.children[0];
+        assert!(para.attrs.classes.contains(&"callout".to_string()));
+        assert!(matches!(
+            &para.children[0].kind,
+            NodeKind::Text(t) if t == "This paragraph has special styling."
+        ));
     }
 
     #[test]

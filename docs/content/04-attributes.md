@@ -53,6 +53,14 @@ This paragraph has special styling. {.callout}
 
 The attributes are attached to the `<p>` element in the output.
 
+A block placed right after a link, image, or other inline element applies to that element instead (`[Docs](/docs/) {.button}` styles the link). When a paragraph ends with one of those, put the block on its own line to target the paragraph:
+
+```markdown
+[Paper](paper.pdf)
+[Code](https://example.com/code)
+{.links}
+```
+
 ## Multiple Classes and Mixed Attributes {#sec:multiple}
 
 You can combine multiple IDs, classes, and key-value pairs in a single attribute block:
