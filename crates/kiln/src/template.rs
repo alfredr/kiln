@@ -30,6 +30,7 @@ pub fn load_templates(
         },
     );
     tera.register_filter("markdown", markdown_filter);
+    tera.register_filter("datefmt", datefmt_filter);
     Ok(tera)
 }
 
@@ -136,6 +137,172 @@ fn markdown_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result
         _ => html,
     };
     Ok(Value::String(html.to_string()))
+}
+
+/// `{{ "2020-05" | datefmt(format="%B %Y") }}` formats a date that may be
+/// partial: a year ("2017"), a month ("2020-05"), a day ("2020-05-28"), an
+/// academic term ("2017-fall"), or "present". The ISO 8601-2 (EDTF) forms
+/// work too: seasons as months 21 to 24 ("2017-23" is Autumn 2017) and ".."
+/// for present. Codes the date can't fill are left out along with the text that follows them, so "%B %-d, %Y" gives
+/// "May 28, 2020", "May 2020", "Fall 2017", or "2017". A list of dates is
+/// formatted one by one, dropping repeats, and joined with `sep` (", ").
+/// "present" prints as the `present` argument ("Present").
+fn datefmt_filter(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
+    let str_arg = |name, default| args.get(name).and_then(Value::as_str).unwrap_or(default);
+    let format = str_arg("format", "%Y-%m-%d");
+    let present = str_arg("present", "Present");
+    let sep = str_arg("sep", ", ");
+    let one = |v: &Value| -> tera::Result<String> {
+        let text = v
+            .as_str()
+            .ok_or("datefmt expects a date string or a list of them")?;
+        if text.eq_ignore_ascii_case("present") || text == ".." {
+            return Ok(present.to_string());
+        }
+        let date = PartialDate::parse(text).map_err(tera::Error::msg)?;
+        date.format(format).map_err(tera::Error::msg)
+    };
+    let out = match value {
+        Value::Array(items) => {
+            let mut parts = items.iter().map(one).collect::<tera::Result<Vec<_>>>()?;
+            parts.dedup();
+            parts.join(sep)
+        }
+        v => one(v)?,
+    };
+    Ok(Value::String(out))
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const TERMS: [&str; 5] = ["Spring", "Summer", "Fall", "Autumn", "Winter"];
+/// ISO 8601-2 seasons 21 to 24.
+const SEASONS: [&str; 4] = ["Spring", "Summer", "Autumn", "Winter"];
+
+/// A date known to the year, month, or day, or an academic term of a year.
+#[derive(Debug, PartialEq)]
+struct PartialDate {
+    year: i32,
+    month: Option<u32>,
+    day: Option<u32>,
+    term: Option<&'static str>,
+}
+
+impl PartialDate {
+    fn parse(text: &str) -> Result<Self, String> {
+        let bad = || {
+            format!(
+                "invalid date '{text}' (expected YYYY, YYYY-MM, YYYY-MM-DD, YYYY-<term>, or present)"
+            )
+        };
+        fn digits<T: std::str::FromStr>(s: &str, len: usize) -> Option<T> {
+            (s.len() == len && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
+        }
+        let mut parts = text.split('-');
+        let year = parts.next().and_then(|y| digits(y, 4)).ok_or_else(bad)?;
+        let date = |month, day, term| Self {
+            year,
+            month,
+            day,
+            term,
+        };
+        match parts.collect::<Vec<_>>()[..] {
+            [] => Ok(date(None, None, None)),
+            [t] if TERMS.iter().any(|n| n.eq_ignore_ascii_case(t)) => {
+                let term = TERMS.iter().find(|n| n.eq_ignore_ascii_case(t)).copied();
+                Ok(date(None, None, term))
+            }
+            [m] => match digits(m, 2) {
+                Some(month @ 1..=12) => Ok(date(Some(month), None, None)),
+                Some(season @ 21..=24) => {
+                    Ok(date(None, None, Some(SEASONS[season as usize - 21])))
+                }
+                _ => Err(bad()),
+            },
+            [m, d] => {
+                let (month, day) = digits(m, 2).zip(digits(d, 2)).ok_or_else(bad)?;
+                chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or_else(bad)?;
+                Ok(date(Some(month), Some(day), None))
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    /// Expand strftime-style codes: %Y year, %m month number, %B month (or
+    /// term) name, %b its abbreviation, %d day, and %% a percent sign. %-m and
+    /// %-d drop the leading zero.
+    fn format(&self, format: &str) -> Result<String, String> {
+        let (prefix, codes) = split_date_format(format)?;
+        let number = |n: u32, pad: bool| format!("{n:0width$}", width = usize::from(pad) + 1);
+        let month_name = self.month.map(|m| MONTHS[m as usize - 1]);
+        let field = |code, pad| match code {
+            'Y' => Some(self.year.to_string()),
+            'm' => self.month.map(|m| number(m, pad)),
+            'd' => self.day.map(|d| number(d, pad)),
+            'B' => self.term.or(month_name).map(str::to_string),
+            'b' => self
+                .term
+                .or(month_name.map(|m| &m[..3]))
+                .map(str::to_string),
+            _ => unreachable!(),
+        };
+        let kept: Vec<(String, &str)> = codes
+            .iter()
+            .filter_map(|((code, pad), text)| {
+                field(*code, *pad).map(|value| (value, text.as_str()))
+            })
+            .collect();
+        let mut pieces: Vec<&str> = kept
+            .iter()
+            .flat_map(|(value, text)| [value.as_str(), text])
+            .collect();
+        // The format's own closing text replaces the text after the last kept code.
+        pieces.pop();
+        let suffix = codes.last().map_or("", |(_, text)| text.as_str());
+        Ok(format!("{prefix}{}{suffix}", pieces.concat()))
+    }
+}
+
+/// Split a date format into the text before its first code, then each code
+/// (and whether it pads to two digits) with the text after it.
+type DateFormat = (String, Vec<((char, bool), String)>);
+
+fn split_date_format(format: &str) -> Result<DateFormat, String> {
+    let mut prefix = String::new();
+    let mut codes: Vec<((char, bool), String)> = Vec::new();
+    let mut chars = format.chars();
+    while let Some(c) = chars.next() {
+        let text = match codes.last_mut() {
+            Some((_, text)) => text,
+            None => &mut prefix,
+        };
+        if c != '%' {
+            text.push(c);
+            continue;
+        }
+        let (pad, code) = match chars.next() {
+            Some('-') => (false, chars.next()),
+            code => (true, code),
+        };
+        match code {
+            Some('%') if pad => text.push('%'),
+            Some(code @ ('Y' | 'm' | 'B' | 'b' | 'd')) => codes.push(((code, pad), String::new())),
+            _ => return Err(format!("unsupported code in date format '{format}'")),
+        }
+    }
+    Ok((prefix, codes))
 }
 
 /// The template a content item renders with: its `template` frontmatter key,
@@ -601,6 +768,66 @@ mod tests {
         assert_eq!(render("*a* b", true), "<em>a</em> b");
         assert_eq!(render("*a* b", false), "<p><em>a</em> b</p>");
         assert_eq!(render("a\n\nb", true), "<p>a</p><p>b</p>");
+    }
+
+    #[test]
+    fn datefmt_partial_dates() {
+        let fmt = |value: Value, args: &[(&str, &str)]| {
+            let args = args
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::from(*v)))
+                .collect();
+            datefmt_filter(&value, &args).map(|v| v.as_str().unwrap().to_string())
+        };
+        let long = |text: &str| fmt(Value::from(text), &[("format", "%B %-d, %Y")]).unwrap();
+        assert_eq!(long("2020-05-28"), "May 28, 2020");
+        assert_eq!(long("2020-05"), "May 2020");
+        assert_eq!(long("2017-fall"), "Fall 2017");
+        assert_eq!(long("2017"), "2017");
+        assert_eq!(long("present"), "Present");
+        assert_eq!(long("2017-21"), "Spring 2017");
+        assert_eq!(long("2017-23"), "Autumn 2017");
+        assert_eq!(long(".."), "Present");
+
+        let with =
+            |text: &str, format: &str| fmt(Value::from(text), &[("format", format)]).unwrap();
+        assert_eq!(with("2026-10", "%Y-%m-%d"), "2026-10");
+        assert_eq!(fmt(Value::from("2026-10"), &[]).unwrap(), "2026-10");
+        assert_eq!(with("2020-05", "%-d %B %Y"), "May 2020");
+        assert_eq!(with("2020-05-08", "%b %-d, %Y"), "May 8, 2020");
+        assert_eq!(with("2020-05-08", "%d/%m/%Y"), "08/05/2020");
+        assert_eq!(with("2017-fall", "%Y"), "2017");
+        assert_eq!(with("2017", "(%B %Y)"), "(2017)");
+        assert_eq!(with("2017", "%Y%%"), "2017%");
+        assert_eq!(
+            fmt(
+                Value::from("Present"),
+                &[("format", "%Y"), ("present", "now")]
+            )
+            .unwrap(),
+            "now"
+        );
+
+        let terms = Value::from(vec!["2021-spring", "2021-fall"]);
+        assert_eq!(fmt(terms.clone(), &[("format", "%Y")]).unwrap(), "2021");
+        assert_eq!(
+            fmt(terms, &[("format", "%B %Y")]).unwrap(),
+            "Spring 2021, Fall 2021"
+        );
+
+        for bad in [
+            "May 2020",
+            "2020-13",
+            "2020-20",
+            "2020-25",
+            "2021-02-30",
+            "20-05",
+            "2020-5",
+            "2020-05-28-1",
+        ] {
+            assert!(fmt(Value::from(bad), &[]).is_err(), "{bad}");
+        }
+        assert!(fmt(Value::from("2020"), &[("format", "%Q")]).is_err());
     }
 
     #[test]
