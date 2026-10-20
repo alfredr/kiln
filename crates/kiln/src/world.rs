@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{Datelike, Timelike};
 use typst::diag::{FileError, FileResult};
@@ -13,9 +13,7 @@ use typst_kit::fonts::{FontSearcher, FontSlot, Fonts};
 use typst_kit::package::PackageStorage;
 
 pub struct KilnWorld {
-    library: LazyHash<Library>,
-    book: LazyHash<FontBook>,
-    fonts: Vec<FontSlot>,
+    shared: &'static Shared,
     main_id: FileId,
     root: PathBuf,
     sources: Mutex<HashMap<FileId, Source>>,
@@ -30,6 +28,30 @@ impl typst_kit::download::Progress for NoopProgress {
     fn print_finish(&mut self, _: &typst_kit::download::DownloadState) {}
 }
 
+/// The parts of a world that are the same for every compile. Searching system
+/// fonts is slow, and a page can hold dozens of compiled nodes, so these load
+/// once per process.
+struct Shared {
+    library: LazyHash<Library>,
+    book: LazyHash<FontBook>,
+    fonts: Vec<FontSlot>,
+}
+
+fn shared() -> &'static Shared {
+    static SHARED: OnceLock<Shared> = OnceLock::new();
+    SHARED.get_or_init(|| {
+        let library = Library::builder()
+            .with_features(Features::from_iter([Feature::Html]))
+            .build();
+        let Fonts { book, fonts } = FontSearcher::new().search();
+        Shared {
+            library: LazyHash::new(library),
+            book: LazyHash::new(book),
+            fonts,
+        }
+    })
+}
+
 impl KilnWorld {
     /// Create a world from an in-memory source string.
     pub fn from_source(source_text: &str, root: &Path) -> anyhow::Result<Self> {
@@ -37,12 +59,6 @@ impl KilnWorld {
         let root = root.to_path_buf();
         let vpath = VirtualPath::new("__inline__.typ");
         let main_id = FileId::new(None, vpath);
-
-        let library = Library::builder()
-            .with_features(Features::from_iter([Feature::Html]))
-            .build();
-
-        let Fonts { book, fonts } = FontSearcher::new().search();
 
         let packages = PackageStorage::new(
             None,
@@ -54,9 +70,7 @@ impl KilnWorld {
         sources.insert(main_id, Source::new(main_id, source_text.to_string()));
 
         Ok(Self {
-            library: LazyHash::new(library),
-            book: LazyHash::new(book),
-            fonts,
+            shared: shared(),
             main_id,
             root,
             sources: Mutex::new(sources),
@@ -87,11 +101,11 @@ impl KilnWorld {
 
 impl World for KilnWorld {
     fn library(&self) -> &LazyHash<Library> {
-        &self.library
+        &self.shared.library
     }
 
     fn book(&self) -> &LazyHash<FontBook> {
-        &self.book
+        &self.shared.book
     }
 
     fn main(&self) -> FileId {
@@ -135,7 +149,7 @@ impl World for KilnWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index)?.get()
+        self.shared.fonts.get(index)?.get()
     }
 
     fn today(&self, offset: Option<i64>) -> Option<Datetime> {

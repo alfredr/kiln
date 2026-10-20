@@ -732,12 +732,20 @@ pub struct Metadata {
 
 // ── Raw block compilation trait ──
 
-/// Trait for compiling raw blocks (e.g. Typst diagrams) into HTML.
+/// Where compiled output sits: as a block of its own, or within a line of text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Block,
+    Inline,
+}
+
+/// Trait for compiling raw blocks (e.g. Typst diagrams), and leaf nodes given
+/// a `format` property (e.g. math), into HTML.
 ///
 /// `kiln-doc` does NOT depend on `typst`. Instead, the consumer provides
 /// an implementation of this trait. The kiln binary provides a `TypstCompiler`.
 pub trait RawBlockCompiler {
-    fn compile(&self, format: &str, source: &str) -> Result<String, String>;
+    fn compile(&self, format: &str, source: &str, placement: Placement) -> Result<String, String>;
 }
 
 // ── Convenience constructors ──

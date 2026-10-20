@@ -65,6 +65,8 @@ This produces:
 
 kiln compiles this Typst source into an inline SVG at build time and injects the result into your page. The output replaces the code block entirely — no `<pre>` or `<code>` tags are produced.
 
+The SVG is sized in em, with Typst's default 11pt text mapped to 1em, so it scales with the text around it. It has no background, and text you have not colored yourself takes the color of the surrounding page text, so it works in both light and dark themes.
+
 ### A More Involved Example
 
 ````
@@ -213,6 +215,8 @@ This produces:
 ```
 
 The alias prepends the `preamble` (the `#import` line) before your content, so you write only the diagram code. kiln downloads the package on first build and caches it locally.
+
+An alias can also set a `template`, which says how your content becomes Typst source, with `{source}` marking where it goes. It defaults to `"{source}"`, your content as is. A template of `"${source}$"` turns content into a Typst equation, which is how [math](/markdown/) can be rendered by configuration.
 
 ## Behavior Without a Compiler {#sec:no-compiler}
 

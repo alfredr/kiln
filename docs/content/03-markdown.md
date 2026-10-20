@@ -250,7 +250,7 @@ Each produces a `<hr>` element. You can use spaces between the characters if you
 
 ## Math {#sec:math}
 
-Kiln supports LaTeX-style math syntax.
+Kiln recognizes math between dollar signs. It does not interpret what is inside them: how math renders, and so which syntax you write it in, is configuration (see [Rendering Math](#sec:math-render) below).
 
 **Inline math.** Wrap an expression in single dollar signs:
 
@@ -268,7 +268,35 @@ $$
 $$
 ```
 
-Display math renders as a block element, centered on its own line. You can pair this with a math rendering library like KaTeX or MathJax in your templates.
+Display math renders as a block element, centered on its own line.
+
+### Rendering Math {#sec:math-render}
+
+By default kiln writes math out as its source, inside `<span class="math">` or `<div class="math display">`. That suits a client-side renderer such as KaTeX or MathJax, loaded from your templates.
+
+To typeset math at build time instead, give it a `format` with a hint in `kiln.toml`. Kiln then compiles it the way it compiles a [raw block](/raw-blocks/), using a format alias whose `template` turns the source into Typst:
+
+```toml
+[[hints]]
+selector = 'math[display="false"]'
+format = "math"
+
+[[hints]]
+selector = 'math[display="true"]'
+format = "math-display"
+
+[[typst.formats]]
+name = "math"
+template = "${source}$"
+
+[[typst.formats]]
+name = "math-display"
+template = "$ {source} $"
+```
+
+With this configuration, math is written in Typst's syntax: `$sqrt(x^2 + 1)$` rather than `$\sqrt{x^2 + 1}$`. Inline math becomes an SVG sized in em that sits on the baseline of the surrounding text and takes its color. The source stays in the page as visually hidden text, so it can still be copied, found and read by screen readers.
+
+Math is not special in this: any inline code (`code-inline`) given a `format` compiles the same way.
 
 ## Escaping Special Characters {#sec:escaping}
 

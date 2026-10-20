@@ -145,7 +145,11 @@ fn render_node(node: &Node, out: &mut String) {
         }
         NodeKind::Math { display, source } => render_math(*display, source, &node.attrs, out),
         NodeKind::Text(s) => out.push_str(&escape_html(s)),
-        NodeKind::Code(s) => Tag::new("code").wrap_text(s, out),
+        NodeKind::Code(s) => {
+            Tag::new("code").open(out);
+            render_leaf_source(s, &node.attrs, "span", out);
+            close_tag("code", out);
+        }
         NodeKind::Emphasis => Tag::new("em").wrap(node, out),
         NodeKind::Strong => Tag::new("strong").wrap(node, out),
         NodeKind::Strikethrough => Tag::new("del").wrap(node, out),
@@ -407,12 +411,41 @@ fn render_math(display: bool, source: &str, attrs: &Attrs, out: &mut String) {
             tag = tag.attr("id", &attrs.id);
         }
         tag.open(out);
-        out.push_str(&escape_html(source));
+        render_leaf_source(source, attrs, "div", out);
         close_tag("div", out);
     } else {
         Tag::new("span").class("math").open(out);
-        out.push_str(&escape_html(source));
+        render_leaf_source(source, attrs, "span", out);
         close_tag("span", out);
+    }
+}
+
+/// Hides text visually while leaving it to copy, find-in-page and screen readers.
+const VISUALLY_HIDDEN: &str =
+    "position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap";
+
+/// Write a leaf's source, or its compiled form if a `format` property compiled it.
+///
+/// A format changes how the source is drawn, not what it says, so compiled
+/// output is hidden from screen readers and the source stays in the page as
+/// visually hidden text. `wrapper` is the element holding the compiled output:
+/// `div` for a block, `span` within a line.
+fn render_leaf_source(source: &str, attrs: &Attrs, wrapper: &str, out: &mut String) {
+    if let Some(Value::Text(e)) = attrs.properties.get("compile_error") {
+        Tag::new("code").class("raw-error").wrap_text(e, out);
+        return;
+    }
+    match attrs.properties.get("compiled") {
+        Some(Value::Text(html)) => {
+            Tag::new(wrapper).attr("aria-hidden", "true").open(out);
+            out.push_str(html);
+            close_tag(wrapper, out);
+            Tag::new("span")
+                .class("source")
+                .attr("style", VISUALLY_HIDDEN)
+                .wrap_text(source, out);
+        }
+        _ => out.push_str(&escape_html(source)),
     }
 }
 
@@ -594,19 +627,56 @@ mod tests {
 
     // -- raw block tests with compiler --
 
-    use crate::ast::RawBlockCompiler;
+    use crate::ast::{Placement, RawBlockCompiler};
     use crate::visit::Pass;
 
     struct TestCompiler;
 
     impl RawBlockCompiler for TestCompiler {
-        fn compile(&self, format: &str, source: &str) -> Result<String, String> {
-            match format {
-                "html" => Ok(source.to_string()),
-                "typst" => Ok(format!("<div class=\"typst\">{source}</div>")),
+        fn compile(&self, format: &str, source: &str, placement: Placement) -> Result<String, String> {
+            match (format, placement) {
+                ("html", _) => Ok(source.to_string()),
+                ("typst", Placement::Block) => Ok(format!("<div class=\"typst\">{source}</div>")),
+                ("typst", Placement::Inline) => Ok(format!("<svg>{source}</svg>")),
                 _ => Err(format!("unsupported: {format}")),
             }
         }
+    }
+
+    #[test]
+    fn math_without_format_renders_source() {
+        let html = render_with_compiler("Inline $a < b$ here.");
+        assert!(html.contains("<span class=\"math\">a &lt; b</span>"));
+    }
+
+    #[test]
+    fn math_with_format_renders_compiled_and_hidden_source() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\nInline $a < b$ here.");
+        assert!(html.contains(
+            "<span class=\"math\"><span aria-hidden=\"true\"><svg>a < b</svg></span>\
+             <span class=\"source\" style=\""
+        ));
+        assert!(html.contains(">a &lt; b</span></span>"));
+    }
+
+    #[test]
+    fn display_math_with_format_compiles_as_block() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\n$$\nx\n$$");
+        assert!(html.contains(
+            "<div class=\"math display\"><div aria-hidden=\"true\"><div class=\"typst\">\nx\n</div></div>"
+        ));
+    }
+
+    #[test]
+    fn math_with_failing_format_renders_error() {
+        let html = render_with_compiler("{@hint(math, format=nope)}\n\nInline $x$ here.");
+        assert!(html.contains("<span class=\"math\"><code class=\"raw-error\">unsupported: nope</code></span>"));
+    }
+
+    #[test]
+    fn inline_code_with_format_renders_compiled() {
+        let html = render_with_compiler("{@hint(code-inline, format=typst)}\n\nSome `x` code.");
+        assert!(html.contains("<code><span aria-hidden=\"true\"><svg>x</svg></span>"));
     }
 
     fn render_with_compiler(md: &str) -> String {

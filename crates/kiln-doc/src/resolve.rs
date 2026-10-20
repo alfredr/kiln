@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::ast::{
     Action, Bind, Declaration, Document, Event, FormatToken, Init, Node, NodeKind, OnDirective,
-    PushValue, RawBlockCompiler, Selector, Value,
+    Placement, PushValue, RawBlockCompiler, Selector, Value,
 };
 use crate::selector::{NodeSnapshot, matches_selector, node_kind_name};
 use crate::visit::Pass;
@@ -1272,11 +1272,14 @@ fn format_label_display(template: &str, number: &str) -> String {
 
 // ── CompileBlocks pass ──
 
-/// Compile raw blocks and preview code blocks, storing results in `attrs.properties`.
+/// Compile raw blocks, preview code blocks and formatted leaves, storing
+/// results in `attrs.properties`.
 ///
-/// Must run after `CascadeInits` (reads the `preview` property).
+/// Must run after `CascadeInits` (reads the `preview` and `format` properties).
 /// For each `RawBlock`, compiles via the provided `RawBlockCompiler`.
 /// For each `CodeBlock` with `preview`, compiles using the preview format.
+/// For each `Math` or inline `Code` with a `format` property, compiles using
+/// that format. Nothing sets `format` by default, so they compile only as configured.
 /// Stores compiled HTML in `properties["compiled"]` and errors in
 /// `properties["compile_error"]`.
 pub struct CompileBlocks<'a> {
@@ -1301,11 +1304,18 @@ fn compile_blocks(node: &mut Node, compiler: &dyn RawBlockCompiler) {
         NodeKind::CodeBlock { lang, source } if node.attrs.properties.contains_key("preview") => {
             Some((lang.clone(), source.clone()))
         }
+        NodeKind::Math { source, .. } | NodeKind::Code(source) => {
+            match node.attrs.properties.get("format") {
+                Some(Value::Text(format)) => Some((format.clone(), source.clone())),
+                _ => None,
+            }
+        }
         _ => None,
     };
     if let Some((default_fmt, source)) = compile_target {
         let format = get_compile_format(&node.attrs, &default_fmt);
-        store_compiled(node, compiler, &format, &source);
+        let placement = placement(&node.kind);
+        store_compiled(node, compiler, &format, &source, placement);
     }
 
     for child in &mut node.children {
@@ -1313,8 +1323,22 @@ fn compile_blocks(node: &mut Node, compiler: &dyn RawBlockCompiler) {
     }
 }
 
-fn store_compiled(node: &mut Node, compiler: &dyn RawBlockCompiler, format: &str, source: &str) {
-    let (key, val) = match compiler.compile(format, source) {
+/// Math set apart with `$$` is a block; other math and inline code sit in a line.
+fn placement(kind: &NodeKind) -> Placement {
+    match kind {
+        NodeKind::Math { display: false, .. } | NodeKind::Code(_) => Placement::Inline,
+        _ => Placement::Block,
+    }
+}
+
+fn store_compiled(
+    node: &mut Node,
+    compiler: &dyn RawBlockCompiler,
+    format: &str,
+    source: &str,
+    placement: Placement,
+) {
+    let (key, val) = match compiler.compile(format, source, placement) {
         Ok(html) => ("compiled", html),
         Err(e) => ("compile_error", e),
     };
@@ -2078,13 +2102,76 @@ See @fig:pic.";
     struct TestCompiler;
     #[allow(clippy::excessive_nesting)]
     impl RawBlockCompiler for TestCompiler {
-        fn compile(&self, format: &str, source: &str) -> Result<String, String> {
+        fn compile(&self, format: &str, source: &str, placement: Placement) -> Result<String, String> {
             if format == "fail" {
                 Err("compile error".into())
             } else {
-                Ok(format!("<compiled>{source}</compiled>"))
+                Ok(format!("<compiled {placement:?}>{source}</compiled>"))
             }
         }
+    }
+
+    fn compiled_text(node: &Node) -> Option<&str> {
+        match node.attrs.properties.get("compiled") {
+            Some(Value::Text(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn compile_blocks_math_only_when_configured() {
+        reset_id_counter();
+        let mut doc = parse("Inline $x^2$ here.").unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let maths = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Math { .. }));
+        assert_eq!(maths.len(), 1);
+        assert!(compiled_text(maths[0]).is_none(), "math without a format stays as source");
+    }
+
+    #[test]
+    fn compile_blocks_math_with_format() {
+        reset_id_counter();
+        let input = "{@hint(math, format=tmath)}\n\nInline $x^2$ here.\n\n$$\ny\n$$";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let maths = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Math { .. }));
+        assert_eq!(maths.len(), 2);
+        assert_eq!(compiled_text(maths[0]), Some("<compiled Inline>x^2</compiled>"));
+        assert_eq!(compiled_text(maths[1]), Some("<compiled Block>\ny\n</compiled>"));
+    }
+
+    #[test]
+    fn compile_blocks_math_format_by_display() {
+        reset_id_counter();
+        let input = "{@hint(math[display=\"true\"], format=fail)}\n\nInline $x$.\n\n$$\ny\n$$";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let maths = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Math { .. }));
+        assert!(!maths[0].attrs.properties.contains_key("compile_error"));
+        assert!(compiled_text(maths[0]).is_none());
+        assert!(maths[1].attrs.properties.contains_key("compile_error"));
+    }
+
+    #[test]
+    fn compile_blocks_inline_code_with_format() {
+        reset_id_counter();
+        let input = "{@hint(code-inline, format=tcode)}\n\nSome `x` code.";
+        let mut doc = parse(input).unwrap();
+        HoistDirectives.run(&mut doc);
+        CascadeInits.run(&mut doc);
+        CompileBlocks::new(&TestCompiler).run(&mut doc);
+
+        let codes = find_all(&doc.content, |n| matches!(n.kind, NodeKind::Code(_)));
+        assert_eq!(compiled_text(codes[0]), Some("<compiled Inline>x</compiled>"));
     }
 
     #[test]

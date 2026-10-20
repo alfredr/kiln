@@ -1,11 +1,13 @@
 use std::path::Path;
 
 use anyhow::Context;
-use typst::layout::PagedDocument;
+use typst::foundations::Label;
+use typst::layout::{Abs, PagedDocument};
+use typst::utils::PicoStr;
 use typst_html::HtmlDocument;
 
 use kiln_doc::ast::{
-    Bind, CompoundSelector, Declaration, Document, Init, Selector, SelectorExpr, Value,
+    Bind, CompoundSelector, Declaration, Document, Init, Placement, Selector, SelectorExpr, Value,
 };
 
 use crate::config::{Config, TypstConfig};
@@ -15,6 +17,18 @@ use crate::world::KilnWorld;
 
 const BUILTIN_PRELUDE: &str = include_str!("prelude.kiln");
 
+/// Typst's default text size, in points. SVG output is sized in em against it,
+/// so Typst text at its default size matches the size of the text around it.
+const TYPST_EM_PT: f64 = 11.0;
+
+/// Default text color for SVG output, rewritten to `currentColor` so output
+/// takes the color of the text around it. Explicit colors are left alone.
+const INK: &str = "#010203";
+
+/// Label of a marker placed where inline content starts. Typst positions it on
+/// the line's baseline, which is how inline SVG lines up with the text around it.
+const BASELINE_LABEL: &str = "kiln-baseline";
+
 /// A RawBlockCompiler that compiles Typst blocks using KilnWorld.
 struct TypstCompiler<'a> {
     project_root: &'a Path,
@@ -22,7 +36,7 @@ struct TypstCompiler<'a> {
 }
 
 impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
-    fn compile(&self, format: &str, source: &str) -> Result<String, String> {
+    fn compile(&self, format: &str, source: &str, placement: Placement) -> Result<String, String> {
         // Passthrough formats
         match format {
             "html" => return Ok(source.to_string()),
@@ -33,26 +47,39 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
             _ => {}
         }
 
-        // Resolve output mode and effective source (with preamble if an alias).
-        let (output_mode, effective_source): (&str, String) = match format {
-            "typst" | "typst-html" => (format, source.to_string()),
+        // Resolve output mode, preamble and content (templated if an alias).
+        let (output_mode, preamble, content): (&str, &str, String) = match format {
+            "typst" | "typst-html" => (format, "", source.to_string()),
             _ => match self.typst_config.formats.iter().find(|f| f.name == format) {
-                Some(alias) => {
-                    let src = if alias.preamble.is_empty() {
-                        source.to_string()
-                    } else {
-                        format!("{}\n{}", alias.preamble, source)
-                    };
-                    (alias.output.as_str(), src)
-                }
+                Some(alias) => (
+                    alias.output.as_str(),
+                    alias.preamble.as_str(),
+                    alias.template.replace("{source}", source),
+                ),
                 None => return Err(format!("unsupported raw block format: {format}")),
             },
         };
 
-        // Preamble comes first, then the auto-sizing page rule, then content.
-        let wrapped = format!(
-            "#set page(width: auto, height: auto, margin: 0pt)\n{effective_source}"
-        );
+        // Kiln's page and text rules come first so a preamble can override
+        // them. The baseline marker goes directly before the content, with no
+        // space between them.
+        let mut wrapped = String::from("#set page(width: auto, height: auto, margin: 0pt)\n");
+        if output_mode != "typst-html" {
+            wrapped.push_str(&format!("#set page(fill: none)\n#set text(fill: rgb(\"{INK}\"))\n"));
+        }
+        if placement == Placement::Inline {
+            wrapped.push_str("#set text(top-edge: \"bounds\", bottom-edge: \"bounds\")\n");
+        }
+        if !preamble.is_empty() {
+            wrapped.push_str(preamble);
+            wrapped.push('\n');
+        }
+        if placement == Placement::Inline {
+            // The zero-width `h` keeps the marker inside the paragraph: one at
+            // the very start is moved out of it, to the top of the page.
+            wrapped.push_str(&format!("#h(0pt)#metadata(none)<{BASELINE_LABEL}>"));
+        }
+        wrapped.push_str(&content);
 
         let world = KilnWorld::from_source(&wrapped, self.project_root)
             .map_err(|e| format!("failed to create typst world: {e}"))?;
@@ -69,11 +96,42 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
 
         let document = output.map_err(|errs: ecow::EcoVec<typst::diag::SourceDiagnostic>| {
             let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
-            format!("typst compilation failed: {}", msgs.join("; "))
+            let msg = format!("typst compilation failed: {}", msgs.join("; "));
+            eprintln!("    typst block error: {msg}");
+            msg
         })?;
 
-        Ok(typst_svg::svg_merged(&document, typst::layout::Abs::zero()))
+        let svg = match document.pages.as_slice() {
+            [page] => {
+                let em = Abs::pt(TYPST_EM_PT);
+                let svg = typst_svg::svg_html_frame(&page.frame, em, None, &[], &document.introspector);
+                match placement {
+                    Placement::Inline => align_baseline(svg, &document, page.frame.height()),
+                    Placement::Block => svg,
+                }
+            }
+            // Content that breaks across pages keeps its pages stacked.
+            _ => typst_svg::svg_merged(&document, Abs::zero()),
+        };
+        Ok(svg.replace(&format!("\"{INK}\""), "\"currentColor\""))
     }
+}
+
+/// Shift inline SVG down by the depth of its content below the baseline, so the
+/// content's baseline sits on the baseline of the text around it.
+fn align_baseline(svg: String, document: &PagedDocument, height: Abs) -> String {
+    let label = Label::new(PicoStr::intern(BASELINE_LABEL)).expect("label is not empty");
+    let Some(location) = document.introspector.query_label(label).ok().and_then(|c| c.location())
+    else {
+        return svg;
+    };
+    let baseline = document.introspector.position(location).point.y;
+    let depth = (height - baseline) / Abs::pt(TYPST_EM_PT);
+    svg.replacen(
+        "overflow: visible;",
+        &format!("overflow: visible; vertical-align: {}em;", -depth),
+        1,
+    )
 }
 
 impl TypstCompiler<'_> {
@@ -413,14 +471,14 @@ mod tests {
     #[test]
     fn typst_compiler_handles_html() {
         let c = compiler();
-        let result = c.compile("html", "<div>hello</div>");
+        let result = c.compile("html", "<div>hello</div>", Placement::Block);
         assert_eq!(result.unwrap(), "<div>hello</div>");
     }
 
     #[test]
     fn typst_compiler_handles_mermaid() {
         let c = compiler();
-        let result = c.compile("mermaid", "flowchart LR\n    A --> B");
+        let result = c.compile("mermaid", "flowchart LR\n    A --> B", Placement::Block);
         let svg = result.unwrap();
         assert!(svg.contains("<svg"), "mermaid should produce SVG output");
     }
@@ -428,7 +486,7 @@ mod tests {
     #[test]
     fn typst_compiler_rejects_unknown() {
         let c = compiler();
-        let result = c.compile("latex", "\\frac{1}{2}");
+        let result = c.compile("latex", "\\frac{1}{2}", Placement::Block);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unsupported"));
     }
@@ -653,20 +711,112 @@ mod tests {
     }
 
     fn compiler_with_alias(name: &str, preamble: &str, output: &str) -> TypstCompiler<'static> {
+        compiler_with_template(name, preamble, output, "{source}")
+    }
+
+    fn compiler_with_template(
+        name: &str,
+        preamble: &str,
+        output: &str,
+        template: &str,
+    ) -> TypstCompiler<'static> {
         let config = Box::leak(Box::new(TypstConfig {
             formats: vec![TypstFormatConfig {
                 name: name.to_string(),
                 output: output.to_string(),
                 preamble: preamble.to_string(),
+                template: template.to_string(),
             }],
         }));
         TypstCompiler { project_root: Path::new("/tmp"), typst_config: config }
     }
 
+    /// Read an em length such as `width: 0.52em;` from an SVG's style.
+    fn style_em(svg: &str, property: &str) -> Option<f64> {
+        let start = svg.find(&format!("{property}: "))? + property.len() + 2;
+        let end = start + svg[start..].find("em;")?;
+        svg[start..end].parse().ok()
+    }
+
+    fn inline_math(preamble: &str, source: &str) -> String {
+        compiler_with_template("math", preamble, "typst", "${source}$")
+            .compile("math", source, Placement::Inline)
+            .unwrap()
+    }
+
+    #[test]
+    fn typst_inline_sits_on_the_baseline() {
+        // `x` has no descender, `y` does: only `y` drops below the baseline.
+        let x = style_em(&inline_math("", "x"), "vertical-align").unwrap();
+        let y = style_em(&inline_math("", "y"), "vertical-align").unwrap();
+        assert!(x.abs() < 0.02, "x should sit on the baseline: {x}");
+        assert!(y < -0.1, "y should drop below the baseline: {y}");
+    }
+
+    #[test]
+    fn typst_inline_is_sized_in_em() {
+        let svg = inline_math("", "x");
+        let width = style_em(&svg, "width").unwrap();
+        let height = style_em(&svg, "height").unwrap();
+        assert!(width > 0.3 && width < 0.8, "x is about half an em wide: {width}");
+        assert!(height > 0.3 && height < 0.6, "x is about an x-height tall: {height}");
+    }
+
+    #[test]
+    fn typst_preamble_adds_no_width() {
+        let bare = style_em(&inline_math("", "x"), "width").unwrap();
+        let with_preamble = style_em(&inline_math("#let a = 1", "x"), "width").unwrap();
+        assert!((bare - with_preamble).abs() < 1e-9, "{bare} vs {with_preamble}");
+    }
+
+    #[test]
+    fn typst_output_takes_the_text_color() {
+        let svg = inline_math("", "sqrt(x)");
+        assert!(svg.contains("\"currentColor\""));
+        assert!(!svg.contains(INK));
+        assert!(!svg.contains("#ffffff"), "no page background");
+    }
+
+    #[test]
+    fn typst_explicit_color_is_kept() {
+        let svg = inline_math("", "#text(fill: rgb(\"#ff0000\"))[x]");
+        assert!(svg.contains("#ff0000"));
+        assert!(!svg.contains("currentColor"));
+    }
+
+    #[test]
+    fn typst_block_is_sized_in_em_without_baseline_shift() {
+        let svg = compiler().compile("typst", "$ x $", Placement::Block).unwrap();
+        assert!(style_em(&svg, "width").is_some());
+        assert!(style_em(&svg, "vertical-align").is_none());
+    }
+
+    #[test]
+    fn typst_template_wraps_source() {
+        let c = compiler_with_template("math", "", "typst", "${source}$");
+        assert!(c.compile("math", "x^2", Placement::Inline).is_ok());
+        // Without the template, `x^2` is markup and `^` is not math.
+        let plain = compiler_with_alias("plain", "", "typst");
+        let svg = plain.compile("plain", "x^2", Placement::Inline).unwrap();
+        assert_ne!(svg, c.compile("math", "x^2", Placement::Inline).unwrap());
+    }
+
+    #[test]
+    fn typst_error_is_reported() {
+        let err = inline_math_err("frac(");
+        assert!(err.contains("typst compilation failed"), "{err}");
+    }
+
+    fn inline_math_err(source: &str) -> String {
+        compiler_with_template("math", "", "typst", "${source}$")
+            .compile("math", source, Placement::Inline)
+            .unwrap_err()
+    }
+
     #[test]
     fn typst_compiler_rejects_unknown_with_no_aliases() {
         let c = compiler();
-        let result = c.compile("latex", "\\frac{1}{2}");
+        let result = c.compile("latex", "\\frac{1}{2}", Placement::Block);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unsupported"));
     }
@@ -675,7 +825,7 @@ mod tests {
     fn typst_compiler_named_alias_not_rejected_as_unsupported() {
         // "feynman" alias should not be rejected as unsupported format.
         let c = compiler_with_alias("feynman", "", "typst");
-        let result = c.compile("feynman", "#rect()");
+        let result = c.compile("feynman", "#rect()", Placement::Block);
         if let Err(e) = &result {
             assert!(!e.contains("unsupported"), "alias should not be unsupported: {e}");
         }
@@ -684,8 +834,9 @@ mod tests {
     #[test]
     fn typst_compiler_unknown_with_alias_present_still_rejects_others() {
         let c = compiler_with_alias("feynman", "", "typst");
-        let result = c.compile("latex", "hi");
+        let result = c.compile("latex", "hi", Placement::Block);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unsupported"));
     }
 }
+

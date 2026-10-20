@@ -31,10 +31,18 @@ pub struct TypstFormatConfig {
     /// Typst source lines injected before user content.
     #[serde(default)]
     pub preamble: String,
+    /// How user content becomes Typst source, with `{source}` marking where it
+    /// goes. For example, `"${source}$"` turns `$x^2$` math into a Typst equation.
+    #[serde(default = "default_typst_template")]
+    pub template: String,
 }
 
 fn default_typst_output() -> String {
     "typst".to_string()
+}
+
+fn default_typst_template() -> String {
+    "{source}".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,6 +250,7 @@ mod tests {
         assert_eq!(f.name, "feynman");
         assert_eq!(f.output, "typst");
         assert!(f.preamble.contains("fletcher"));
+        assert_eq!(f.template, "{source}", "template defaults to the source as is");
     }
 
     #[test]
@@ -268,6 +277,7 @@ mod tests {
                     name: "feynman".into(),
                     output: "typst".into(),
                     preamble: "#import \"@preview/fletcher:0.5.7\": diagram".into(),
+                    template: "{source}".into(),
                 }],
             },
         };
