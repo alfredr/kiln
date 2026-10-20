@@ -1,3 +1,4 @@
+mod aliases;
 mod bibliography;
 mod build;
 mod config;

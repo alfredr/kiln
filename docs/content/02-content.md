@@ -81,6 +81,7 @@ All fields are optional:
 | `summary` | string | A short description, useful for index pages and feeds. |
 | `draft` | boolean | When `true`, the entry is excluded from builds unless `--drafts` is passed. Defaults to `false`. |
 | `slug` | string | Override the slug derived from the filename. |
+| `aliases` | list of strings | Earlier addresses of the entry, which redirect to it (see [Renaming](#sec:renaming)). |
 
 The frontmatter is extensible: any additional YAML keys you include are captured in a map and made available to your templates.
 
@@ -92,6 +93,20 @@ By default, the slug is derived from the filename or directory name. You can cus
 2. **Site-wide**: set `slug_pattern` in `kiln.toml` with a regex. The first capture group becomes the slug. For example, `slug_pattern = "^\\d+-(.+)$"` strips numeric prefixes like `01-` from filenames.
 
 Frontmatter `slug` takes priority over `slug_pattern`.
+
+### Renaming {#sec:renaming}
+
+To keep links working when an entry's slug changes, list its earlier slugs as `aliases`:
+
+```yaml
+---
+title: "Helpful data tells on you"
+aliases:
+  - if-it-helps-you
+---
+```
+
+Kiln writes a small page at each alias that sends the browser on to the entry, keeping any `#fragment` in the link, and names the entry's address as canonical so search engines index that one. An alias without a leading slash is an earlier slug in the same section, so for a post `if-it-helps-you` stands for `/posts/if-it-helps-you/`. With a leading slash, it is a whole path from the site root. An alias that is the address of another page, or another alias, stops the build.
 
 ### Section Configuration
 

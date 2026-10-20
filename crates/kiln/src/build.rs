@@ -10,6 +10,7 @@ use kiln_doc::ast::{
     Bind, CompoundSelector, Declaration, Document, Init, Placement, Selector, SelectorExpr, Value,
 };
 
+use crate::aliases::write_aliases;
 use crate::bibliography::{Bibliography, ResolveCitations};
 use crate::config::{Config, TypstConfig};
 use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
@@ -373,6 +374,7 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
         &tree,
         &prelude,
     )?;
+    write_aliases(&tree, &config.site.url, &output_dir)?;
 
     // Generate index page
     let index_html = render_index(&tera, config, &tree)?;

@@ -732,6 +732,10 @@ pub struct Metadata {
     pub draft: bool,
     #[serde(default)]
     pub slug: Option<String>,
+    /// Earlier addresses of the entry, which redirect to it so that links keep
+    /// working after a rename: a slug in the same section, or a path from `/`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     /// Extensible key-value pairs for user-defined metadata.
     /// Also captures `series` and `hints` keys from frontmatter,
     /// which the parser extracts into Declaration/Hint structs.
