@@ -1691,6 +1691,7 @@ dependencies = [
  "clap",
  "comemo 0.4.0",
  "ecow",
+ "hayagriva",
  "kiln-doc",
  "mermaid-rs-renderer",
  "notify-debouncer-mini",

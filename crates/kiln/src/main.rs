@@ -1,3 +1,4 @@
+mod bibliography;
 mod build;
 mod config;
 mod content;

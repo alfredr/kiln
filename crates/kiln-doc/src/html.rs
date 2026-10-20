@@ -165,13 +165,23 @@ fn render_node(node: &Node, out: &mut String) {
                 .ast_attrs(&node.attrs)
                 .open(out);
         }
-        NodeKind::Citation { key } => {
-            Tag::new("cite").attr("data-key", key).open(out);
-            out.push('[');
-            out.push_str(&escape_html(key));
-            out.push(']');
-            close_tag("cite", out);
-        }
+        // A bibliography formats adjacent citations together, in the first one
+        // of the run, and leaves the rest empty.
+        NodeKind::Citation { key } => match node.attrs.properties.get("compiled") {
+            Some(Value::Text(html)) if html.is_empty() => {}
+            Some(Value::Text(html)) => {
+                Tag::new("cite").attr("data-key", key).open(out);
+                out.push_str(html);
+                close_tag("cite", out);
+            }
+            _ => {
+                Tag::new("cite").attr("data-key", key).open(out);
+                out.push('[');
+                out.push_str(&escape_html(key));
+                out.push(']');
+                close_tag("cite", out);
+            }
+        },
         NodeKind::CrossRef { target } => {
             let default_href = format!("#{target}");
             let href = node
@@ -205,10 +215,79 @@ fn render_node(node: &Node, out: &mut String) {
     }
 }
 
+/// Render children in order. Text touching compiled inline output, such as the
+/// comma in `$x$,`, is part of the same word: it is held with the output in a
+/// `nowrap` span, since browsers otherwise break on either side of an SVG.
 fn render_children(node: &Node, out: &mut String) {
-    for child in &node.children {
-        render_node(child, out);
+    let children = &node.children;
+    // The end of the previous text, held back to join the output after it.
+    let mut before = "";
+    // How much of this text the output before it already wrote.
+    let mut written = 0;
+    for (i, child) in children.iter().enumerate() {
+        let next_is_compiled = children.get(i + 1).is_some_and(is_compiled_inline);
+        match &child.kind {
+            NodeKind::Text(text) if written > 0 || next_is_compiled => {
+                before = render_text_rest(&text[written..], next_is_compiled, out);
+                written = 0;
+            }
+            _ if is_compiled_inline(child) => {
+                let after = leading_word_of(children.get(i + 1));
+                written = after.len();
+                render_held(child, before, after, out);
+                before = "";
+            }
+            _ => render_node(child, out),
+        }
     }
+}
+
+/// Write text, holding back its last word when compiled output follows, and
+/// return the word held back.
+fn render_text_rest<'t>(text: &'t str, hold: bool, out: &mut String) -> &'t str {
+    let held = if hold { trailing_word(text) } else { "" };
+    out.push_str(&escape_html(&text[..text.len() - held.len()]));
+    held
+}
+
+/// Write compiled inline output with the text it touches, on one line.
+fn render_held(node: &Node, before: &str, after: &str, out: &mut String) {
+    if before.is_empty() && after.is_empty() {
+        render_node(node, out);
+        return;
+    }
+    Tag::new("span").attr("style", "white-space:nowrap").open(out);
+    out.push_str(&escape_html(before));
+    render_node(node, out);
+    out.push_str(&escape_html(after));
+    close_tag("span", out);
+}
+
+/// The first word of a node, if it is text.
+fn leading_word_of(node: Option<&Node>) -> &str {
+    match node.map(|node| &node.kind) {
+        Some(NodeKind::Text(text)) => leading_word(text),
+        _ => "",
+    }
+}
+
+/// Math or inline code that a `format` property compiled.
+fn is_compiled_inline(node: &Node) -> bool {
+    matches!(node.kind, NodeKind::Math { display: false, .. } | NodeKind::Code(_))
+        && node.attrs.properties.contains_key("compiled")
+}
+
+fn leading_word(text: &str) -> &str {
+    &text[..text.find(char::is_whitespace).unwrap_or(text.len())]
+}
+
+fn trailing_word(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    &text[start..]
 }
 
 fn render_list(node: &Node, ordered: bool, start: Option<u64>, out: &mut String) {
@@ -451,7 +530,8 @@ fn render_leaf_source(source: &str, attrs: &Attrs, wrapper: &str, out: &mut Stri
 
 // ── Escaping ──
 
-fn escape_html(s: &str) -> String {
+/// Escape text for an HTML element's content.
+pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -464,7 +544,8 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-fn escape_attr(s: &str) -> String {
+/// Escape text for a double-quoted HTML attribute value.
+pub fn escape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -671,6 +752,42 @@ mod tests {
     fn math_with_failing_format_renders_error() {
         let html = render_with_compiler("{@hint(math, format=nope)}\n\nInline $x$ here.");
         assert!(html.contains("<span class=\"math\"><code class=\"raw-error\">unsupported: nope</code></span>"));
+    }
+
+    #[test]
+    fn compiled_inline_holds_touching_text() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\nGiven ($Z$), the output.");
+        assert!(html.contains("Given <span style=\"white-space:nowrap\">(<span class=\"math\">"));
+        assert!(html.contains(">Z</span></span>),</span> the output."));
+    }
+
+    #[test]
+    fn compiled_inline_holds_a_whole_touching_word() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\nThe $Z$-only action.");
+        assert!(html.contains("</span></span>-only</span> action."));
+    }
+
+    #[test]
+    fn compiled_inline_between_spaces_is_not_wrapped() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\nGiven $Z$ alone.");
+        assert!(html.contains("Given <span class=\"math\">"));
+        assert!(!html.contains("<span style=\"white-space:nowrap\">"));
+    }
+
+    #[test]
+    fn compiled_inlines_share_text_between_them() {
+        let html = render_with_compiler("{@hint(math, format=typst)}\n\nPair $a$,$b$ here.");
+        // `,` joins the output before it; `$b$` has nothing left to hold.
+        assert_eq!(html.matches("<span style=\"white-space:nowrap\">").count(), 1);
+        assert!(html.contains("Pair <span style=\"white-space:nowrap\"><span class=\"math\">"));
+        assert!(html.contains("</span></span>,</span><span class=\"math\">"));
+        assert!(html.contains("</span></span> here."));
+    }
+
+    #[test]
+    fn uncompiled_math_text_is_untouched() {
+        let html = render_with_compiler("Given ($Z$), the output.");
+        assert!(html.contains("Given (<span class=\"math\">Z</span>), the output."));
     }
 
     #[test]

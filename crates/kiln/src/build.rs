@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use typst::foundations::Label;
-use typst::layout::{Abs, PagedDocument};
+use typst::layout::{Abs, Frame, FrameItem, PagedDocument, Point, Size};
 use typst::utils::PicoStr;
 use typst_html::HtmlDocument;
 
@@ -10,6 +10,7 @@ use kiln_doc::ast::{
     Bind, CompoundSelector, Declaration, Document, Init, Placement, Selector, SelectorExpr, Value,
 };
 
+use crate::bibliography::{Bibliography, ResolveCitations};
 use crate::config::{Config, TypstConfig};
 use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
 use crate::template::{load_templates, render_index, render_page, render_post};
@@ -28,6 +29,21 @@ const INK: &str = "#010203";
 /// Label of a marker placed where inline content starts. Typst positions it on
 /// the line's baseline, which is how inline SVG lines up with the text around it.
 const BASELINE_LABEL: &str = "kiln-baseline";
+
+/// Rules that lay inline content out on a page too narrow for anything to fit,
+/// so Typst breaks it everywhere it may: in math, after relations and binary
+/// operators. Lines are set far apart so they are easy to tell apart.
+const NARROW: &str = "#set page(width: 1pt)\n\
+                      #set par(linebreaks: \"simple\", leading: 1000pt)\n\
+                      #set text(hyphenate: false)\n";
+
+/// Vertical distance that separates lines of the narrow layout.
+const LINE_GAP_PT: f64 = 500.0;
+
+/// A break opportunity between slices of inline output. Its own `white-space`
+/// lets it break inside a `nowrap` element, which is how the HTML renderer keeps
+/// punctuation next to inline output.
+const INLINE_BREAK: &str = "<span style=\"white-space:normal\"><wbr></span>";
 
 /// A RawBlockCompiler that compiles Typst blocks using KilnWorld.
 struct TypstCompiler<'a> {
@@ -63,52 +79,45 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
         // Kiln's page and text rules come first so a preamble can override
         // them. The baseline marker goes directly before the content, with no
         // space between them.
-        let mut wrapped = String::from("#set page(width: auto, height: auto, margin: 0pt)\n");
+        let mut head = String::from("#set page(width: auto, height: auto, margin: 0pt)\n");
         if output_mode != "typst-html" {
-            wrapped.push_str(&format!("#set page(fill: none)\n#set text(fill: rgb(\"{INK}\"))\n"));
+            head.push_str(&format!("#set page(fill: none)\n#set text(fill: rgb(\"{INK}\"))\n"));
         }
         if placement == Placement::Inline {
-            wrapped.push_str("#set text(top-edge: \"bounds\", bottom-edge: \"bounds\")\n");
+            head.push_str("#set text(top-edge: \"bounds\", bottom-edge: \"bounds\")\n");
         }
         if !preamble.is_empty() {
-            wrapped.push_str(preamble);
-            wrapped.push('\n');
+            head.push_str(preamble);
+            head.push('\n');
         }
+        let mut body = String::new();
         if placement == Placement::Inline {
             // The zero-width `h` keeps the marker inside the paragraph: one at
             // the very start is moved out of it, to the top of the page.
-            wrapped.push_str(&format!("#h(0pt)#metadata(none)<{BASELINE_LABEL}>"));
+            body.push_str(&format!("#h(0pt)#metadata(none)<{BASELINE_LABEL}>"));
         }
-        wrapped.push_str(&content);
-
-        let world = KilnWorld::from_source(&wrapped, self.project_root)
-            .map_err(|e| format!("failed to create typst world: {e}"))?;
+        body.push_str(&content);
 
         if output_mode == "typst-html" {
+            let world = KilnWorld::from_source(&format!("{head}{body}"), self.project_root)
+                .map_err(|e| format!("failed to create typst world: {e}"))?;
             return self.compile_typst_html(&world);
         }
 
-        let typst::diag::Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
-
-        for warning in &warnings {
-            eprintln!("    typst block warn: {warning:?}");
-        }
-
-        let document = output.map_err(|errs: ecow::EcoVec<typst::diag::SourceDiagnostic>| {
-            let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
-            let msg = format!("typst compilation failed: {}", msgs.join("; "));
-            eprintln!("    typst block error: {msg}");
-            msg
-        })?;
-
-        let svg = match document.pages.as_slice() {
-            [page] => {
-                let em = Abs::pt(TYPST_EM_PT);
-                let svg = typst_svg::svg_html_frame(&page.frame, em, None, &[], &document.introspector);
-                match placement {
-                    Placement::Inline => align_baseline(svg, &document, page.frame.height()),
-                    Placement::Block => svg,
-                }
+        let document = self.compile_paged(&format!("{head}{body}"))?;
+        let em = Abs::pt(TYPST_EM_PT);
+        let svg = match (document.pages.as_slice(), placement) {
+            ([page], Placement::Inline) => {
+                // Where Typst breaks the content when nothing fits is where the
+                // browser may break it too.
+                let starts = self
+                    .compile_paged(&format!("{head}{NARROW}{body}"))
+                    .map(|narrow| line_starts(&narrow))
+                    .unwrap_or_default();
+                inline_svg(&document, &page.frame, &starts)
+            }
+            ([page], Placement::Block) => {
+                typst_svg::svg_html_frame(&page.frame, em, None, &[], &document.introspector)
             }
             // Content that breaks across pages keeps its pages stacked.
             _ => typst_svg::svg_merged(&document, Abs::zero()),
@@ -117,15 +126,32 @@ impl kiln_doc::ast::RawBlockCompiler for TypstCompiler<'_> {
     }
 }
 
+/// Inline SVG for a frame: one SVG per slice, each on the frame's baseline,
+/// with a break opportunity between slices.
+fn inline_svg(document: &PagedDocument, frame: &Frame, starts: &[usize]) -> String {
+    let em = Abs::pt(TYPST_EM_PT);
+    let baseline = baseline(document);
+    let svgs: Vec<String> = slice_at_glyphs(frame, starts)
+        .iter()
+        .map(|slice| {
+            let svg = typst_svg::svg_html_frame(slice, em, None, &[], &document.introspector);
+            let Some(baseline) = baseline else { return svg };
+            align_baseline(svg, slice.height(), baseline)
+        })
+        .collect();
+    svgs.join(INLINE_BREAK)
+}
+
+/// Where the baseline marker sits, measured from the top of the page.
+fn baseline(document: &PagedDocument) -> Option<Abs> {
+    let label = Label::new(PicoStr::intern(BASELINE_LABEL)).expect("label is not empty");
+    let location = document.introspector.query_label(label).ok()?.location()?;
+    Some(document.introspector.position(location).point.y)
+}
+
 /// Shift inline SVG down by the depth of its content below the baseline, so the
 /// content's baseline sits on the baseline of the text around it.
-fn align_baseline(svg: String, document: &PagedDocument, height: Abs) -> String {
-    let label = Label::new(PicoStr::intern(BASELINE_LABEL)).expect("label is not empty");
-    let Some(location) = document.introspector.query_label(label).ok().and_then(|c| c.location())
-    else {
-        return svg;
-    };
-    let baseline = document.introspector.position(location).point.y;
+fn align_baseline(svg: String, height: Abs, baseline: Abs) -> String {
     let depth = (height - baseline) / Abs::pt(TYPST_EM_PT);
     svg.replacen(
         "overflow: visible;",
@@ -134,7 +160,138 @@ fn align_baseline(svg: String, document: &PagedDocument, height: Abs) -> String 
     )
 }
 
+/// The drawn items of a frame in order, positioned relative to its origin.
+/// Groups that only translate are flattened; others stay whole.
+fn leaves(frame: &Frame, at: Point, out: &mut Vec<(Point, FrameItem)>) {
+    for (pos, item) in frame.items() {
+        let pos = at + *pos;
+        match item {
+            FrameItem::Group(group) if group.transform.is_identity() && group.clip.is_none() => {
+                leaves(&group.frame, pos, out);
+            }
+            FrameItem::Tag(_) => {}
+            _ => out.push((pos, item.clone())),
+        }
+    }
+}
+
+fn glyph_count(item: &FrameItem) -> usize {
+    match item {
+        FrameItem::Text(text) => text.glyphs.len(),
+        FrameItem::Group(group) => group.frame.items().map(|(_, item)| glyph_count(item)).sum(),
+        _ => 0,
+    }
+}
+
+/// The right edge of a leaf that holds glyphs.
+fn right_edge(pos: Point, item: &FrameItem) -> Abs {
+    match item {
+        FrameItem::Text(text) => pos.x + text.width(),
+        FrameItem::Group(group) => pos.x + group.frame.width(),
+        _ => pos.x,
+    }
+}
+
+/// The glyph index at which each line after the first starts, in a document
+/// laid out with `NARROW`.
+fn line_starts(document: &PagedDocument) -> Vec<usize> {
+    let mut items = Vec::new();
+    for page in &document.pages {
+        leaves(&page.frame, Point::zero(), &mut items);
+    }
+    let mut starts = Vec::new();
+    let mut line_y = None;
+    let mut index = 0;
+    for (pos, item) in &items {
+        let count = glyph_count(item);
+        if count == 0 {
+            continue;
+        }
+        match line_y {
+            Some(y) if pos.y - y < Abs::pt(LINE_GAP_PT) => {}
+            Some(_) => {
+                starts.push(index);
+                line_y = Some(pos.y);
+            }
+            None => line_y = Some(pos.y),
+        }
+        index += count;
+    }
+    starts
+}
+
+/// Cut a frame into slices that start at the given glyph indices. Each cut goes
+/// just after the glyph before it, so spacing stays at the end of a slice, and
+/// every item lands in the slice its position falls in. A cut that falls inside
+/// a run of glyphs is skipped.
+fn slice_at_glyphs(frame: &Frame, starts: &[usize]) -> Vec<Frame> {
+    let mut items = Vec::new();
+    leaves(frame, Point::zero(), &mut items);
+
+    let mut cuts = Vec::new();
+    let mut index = 0;
+    let mut end = Abs::zero();
+    for (pos, item) in items.iter().filter(|(_, item)| glyph_count(item) > 0) {
+        if index > 0 && starts.contains(&index) {
+            cuts.push(end);
+        }
+        end = end.max(right_edge(*pos, item));
+        index += glyph_count(item);
+    }
+
+    let mut slices: Vec<Vec<(Point, FrameItem)>> = vec![Vec::new(); cuts.len() + 1];
+    for (pos, item) in items {
+        let slice = cuts.iter().filter(|&&cut| pos.x >= cut).count();
+        slices[slice].push((pos, item));
+    }
+    slices.retain(|slice| !slice.is_empty());
+
+    // A slice starts where its first item does and ends where the next starts.
+    let lefts: Vec<Abs> = slices
+        .iter()
+        .enumerate()
+        .map(|(i, slice)| {
+            if i == 0 {
+                Abs::zero()
+            } else {
+                slice.iter().map(|(pos, _)| pos.x).fold(Abs::inf(), Abs::min)
+            }
+        })
+        .collect();
+    slices
+        .into_iter()
+        .enumerate()
+        .map(|(i, items)| {
+            let left = lefts[i];
+            let right = lefts.get(i + 1).copied().unwrap_or(frame.width());
+            let mut slice = Frame::soft(Size::new(right - left, frame.height()));
+            for (pos, item) in items {
+                slice.push(Point::new(pos.x - left, pos.y), item);
+            }
+            slice
+        })
+        .collect()
+}
+
 impl TypstCompiler<'_> {
+    fn compile_paged(&self, source: &str) -> Result<PagedDocument, String> {
+        let world = KilnWorld::from_source(source, self.project_root)
+            .map_err(|e| format!("failed to create typst world: {e}"))?;
+
+        let typst::diag::Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
+
+        for warning in &warnings {
+            eprintln!("    typst block warn: {warning:?}");
+        }
+
+        output.map_err(|errs: ecow::EcoVec<typst::diag::SourceDiagnostic>| {
+            let msgs: Vec<String> = errs.iter().map(|e| format!("{e:?}")).collect();
+            let msg = format!("typst compilation failed: {}", msgs.join("; "));
+            eprintln!("    typst block error: {msg}");
+            msg
+        })
+    }
+
     fn compile_typst_html(&self, world: &KilnWorld) -> Result<String, String> {
         let typst::diag::Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
 
@@ -203,7 +360,8 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     let (declarations, mut inits) = kiln_doc::parse_prelude(&prelude_text);
     inits.extend(config_inits(&config.hints));
 
-    let prelude = Prelude { inits, declarations };
+    let bibliography = Bibliography::load(&config.bibliography, project_root)?;
+    let prelude = Prelude { inits, declarations, bibliography };
 
     // Compile the content tree
     compile_tree(
@@ -229,9 +387,11 @@ pub fn build(project_root: &Path, config: &Config, include_drafts: bool) -> anyh
     Ok(())
 }
 
+/// What every page is compiled with, besides its own content.
 struct Prelude {
     inits: Vec<Init>,
     declarations: Vec<Declaration>,
+    bibliography: Option<Bibliography>,
 }
 
 fn compile_tree(
@@ -278,15 +438,20 @@ fn compile_tree(
         let mut cascade = kiln_doc::resolve::CascadeInits;
         let mut execute = kiln_doc::resolve::ExecuteProgram;
         let mut cross_refs = kiln_doc::resolve::ResolveCrossRefs;
+        let mut citations =
+            prelude.bibliography.as_ref().map(|bibliography| ResolveCitations { bibliography });
         let mut compile = kiln_doc::resolve::CompileBlocks::new(compiler);
-        let passes: &mut [&mut dyn kiln_doc::visit::Pass] = &mut [
+        let mut passes: Vec<&mut dyn kiln_doc::visit::Pass> = vec![
             &mut inject,
             &mut hoist,
             &mut cascade,
             &mut execute,
             &mut cross_refs,
-            &mut compile,
         ];
+        if let Some(citations) = citations.as_mut() {
+            passes.push(citations);
+        }
+        passes.push(&mut compile);
 
         let render_fn = if is_post { render_post } else { render_page };
 
@@ -295,8 +460,8 @@ fn compile_tree(
             &item.source_dir,
             &dest,
             &child_dirs,
-            passes,
-            |body| render_fn(tera, config, item, body, tree),
+            &mut passes,
+            |body, bibliography| render_fn(tera, config, item, body, bibliography, tree),
         )?;
     }
 
@@ -380,7 +545,7 @@ fn compile_content(
     dest_dir: &Path,
     skip_dirs: &[&str],
     passes: &mut [&mut dyn kiln_doc::visit::Pass],
-    render_fn: impl FnOnce(&str) -> anyhow::Result<String>,
+    render_fn: impl FnOnce(&str, &str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let markdown = std::fs::read_to_string(md_path)
         .with_context(|| format!("failed to read {}", md_path.display()))?;
@@ -393,7 +558,11 @@ fn compile_content(
     }
 
     let body_html = kiln_doc::html::render_html(&doc);
-    let full_html = render_fn(&body_html)?;
+    let bibliography = match doc.content.attrs.properties.get("bibliography") {
+        Some(Value::Text(html)) => html.as_str(),
+        _ => "",
+    };
+    let full_html = render_fn(&body_html, bibliography)?;
 
     std::fs::create_dir_all(dest_dir)?;
     std::fs::write(dest_dir.join("index.html"), &full_html)?;
@@ -813,6 +982,48 @@ mod tests {
             .unwrap_err()
     }
 
+    /// Every em length for a property in an SVG's styles, in order.
+    fn style_ems(svg: &str, property: &str) -> Vec<f64> {
+        svg.split("<svg").skip(1).filter_map(|s| style_em(s, property)).collect()
+    }
+
+    #[test]
+    fn typst_inline_breaks_where_typst_would() {
+        // Typst breaks inline math after relations and binary operators only.
+        assert_eq!(inline_math("", "a = f(x) + b").matches(INLINE_BREAK).count(), 2);
+        assert_eq!(inline_math("", "I(Y; X | Z) > 0").matches(INLINE_BREAK).count(), 1);
+        assert_eq!(inline_math("", "I(Y; X | Z)").matches(INLINE_BREAK).count(), 0);
+    }
+
+    #[test]
+    fn typst_inline_slices_add_up_on_one_baseline() {
+        let sliced = inline_math("", "a = f(x) + b");
+        // A block is never sliced, so it gives the unbroken width.
+        let whole = compiler_with_template("math", "", "typst", "${source}$")
+            .compile("math", "a = f(x) + b", Placement::Block)
+            .unwrap();
+        assert!(!whole.contains(INLINE_BREAK));
+
+        let total: f64 = style_ems(&sliced, "width").iter().sum();
+        let expected = style_em(&whole, "width").unwrap();
+        assert!((total - expected).abs() < 1e-6, "{total} vs {expected}");
+
+        let heights = style_ems(&sliced, "height");
+        let shifts = style_ems(&sliced, "vertical-align");
+        assert_eq!(shifts.len(), 3);
+        assert!(heights.windows(2).all(|w| w[0] == w[1]), "{heights:?}");
+        assert!(shifts.windows(2).all(|w| w[0] == w[1]), "{shifts:?}");
+    }
+
+    #[test]
+    fn typst_inline_fraction_keeps_its_bar() {
+        let svg = inline_math("", "a = 1/2");
+        let slices: Vec<&str> = svg.split(INLINE_BREAK).collect();
+        assert_eq!(slices.len(), 2);
+        assert!(!slices[0].contains("typst-shape"), "the bar is not left behind");
+        assert!(slices[1].contains("typst-shape"), "the bar moves with the fraction");
+    }
+
     #[test]
     fn typst_compiler_rejects_unknown_with_no_aliases() {
         let c = compiler();
@@ -839,4 +1050,5 @@ mod tests {
         assert!(result.unwrap_err().contains("unsupported"));
     }
 }
+
 

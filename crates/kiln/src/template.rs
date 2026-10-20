@@ -446,6 +446,7 @@ fn render_content(
     tree: &ContentTree,
     template: &str,
     body_html: &str,
+    bibliography_html: &str,
     populate: impl FnOnce(&mut tera::Context),
 ) -> anyhow::Result<String> {
     let mut ctx = tera::Context::new();
@@ -453,6 +454,8 @@ fn render_content(
     insert_nav(&mut ctx, tree);
     populate(&mut ctx);
     ctx.insert("body", body_html);
+    // The works the page cites, as a list; empty without a bibliography.
+    ctx.insert("bibliography", bibliography_html);
     tera.render(template, &ctx)
         .with_context(|| format!("failed to render {template}"))
 }
@@ -462,10 +465,11 @@ pub fn render_post(
     config: &Config,
     post: &ContentItem,
     body_html: &str,
+    bibliography_html: &str,
     tree: &ContentTree,
 ) -> anyhow::Result<String> {
     let template = template_for(&post.meta, "post.html");
-    render_content(tera, config, tree, template, body_html, |ctx| {
+    render_content(tera, config, tree, template, body_html, bibliography_html, |ctx| {
         ctx.insert("title", &post.meta.title.as_deref().unwrap_or(&post.slug));
         ctx.insert("path", &post.path);
         ctx.insert("slug", &post.slug);
@@ -481,10 +485,11 @@ pub fn render_page(
     config: &Config,
     page: &ContentItem,
     body_html: &str,
+    bibliography_html: &str,
     tree: &ContentTree,
 ) -> anyhow::Result<String> {
     let template = template_for(&page.meta, "page.html");
-    render_content(tera, config, tree, template, body_html, |ctx| {
+    render_content(tera, config, tree, template, body_html, bibliography_html, |ctx| {
         ctx.insert("title", &page.meta.title.as_deref().unwrap_or(&page.slug));
         ctx.insert("path", &page.path);
         ctx.insert("slug", &page.slug);
@@ -529,6 +534,7 @@ mod tests {
             build: crate::config::BuildConfig::default(),
             hints: vec![],
             typst: Default::default(),
+            bibliography: Default::default(),
         }
     }
 

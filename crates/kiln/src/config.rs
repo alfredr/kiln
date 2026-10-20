@@ -13,6 +13,33 @@ pub struct Config {
     pub hints: Vec<HintConfig>,
     #[serde(default)]
     pub typst: TypstConfig,
+    #[serde(default)]
+    pub bibliography: BibliographyConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BibliographyConfig {
+    /// A BibTeX or BibLaTeX file of the works that `[@key]` citations refer
+    /// to, relative to the project root. Without one, citations render as
+    /// their keys.
+    pub file: Option<String>,
+    /// The citation style, by its name in Hayagriva's archive of CSL styles,
+    /// such as `"ieee"`, `"apa"` or `"chicago-author-date"`.
+    #[serde(default = "default_citation_style")]
+    pub style: String,
+}
+
+impl Default for BibliographyConfig {
+    fn default() -> Self {
+        Self {
+            file: None,
+            style: default_citation_style(),
+        }
+    }
+}
+
+fn default_citation_style() -> String {
+    "ieee".to_string()
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -280,6 +307,7 @@ mod tests {
                     template: "{source}".into(),
                 }],
             },
+            bibliography: BibliographyConfig::default(),
         };
         assert!(config.typst_format("feynman").is_some());
         assert!(config.typst_format("unknown").is_none());

@@ -69,3 +69,30 @@ For multiple citations:
 ```
 
 You can use these `data-key` attributes in your templates or client-side scripts to resolve citations against a bibliography.
+
+### Bibliography {#sec:bibliography}
+
+To resolve citations at build time instead, name a BibTeX or BibLaTeX file and a citation style in `kiln.toml`:
+
+```toml
+[bibliography]
+file = "data/references.bib"
+style = "ieee"
+```
+
+The style is a name from [Hayagriva](https://github.com/typst/hayagriva)'s archive of CSL styles, such as `ieee`, `apa` or `chicago-author-date`; it defaults to `ieee`. Kiln then formats each citation in the style and links it to the work it cites. Citations written together, like `[@smith2024; @jones2025]`, become one citation:
+
+```html
+<cite data-key="smith2024"><a href="#ref-smith2024">[1]</a>, <a href="#ref-jones2025">[2]</a></cite>
+```
+
+Templates get the works the page cites as a `bibliography` variable, a `<ul class="references">` whose items have ids such as `ref-smith2024`. It is empty on a page without citations:
+
+```html
+{% if bibliography %}
+<h2>References</h2>
+{{ bibliography | safe }}
+{% endif %}
+```
+
+A key the file does not have is reported during the build and rendered as before.
