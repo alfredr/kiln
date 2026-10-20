@@ -86,6 +86,11 @@ pub enum NodeKind {
     /// A paragraph containing only an Image, promoted to a figure.
     Figure,
     Caption,
+    /// A footnote's text, written `[^label]: text`. It renders with the other
+    /// notes after the content, not where it is written.
+    FootnoteDef {
+        label: String,
+    },
 
     // Leaf blocks — carry content as String
     CodeBlock {
@@ -121,6 +126,10 @@ pub enum NodeKind {
     },
     CrossRef {
         target: String,
+    },
+    /// A reference to a footnote, written `[^label]`.
+    FootnoteRef {
+        label: String,
     },
     SoftBreak,
     HardBreak,
@@ -777,6 +786,8 @@ impl Node {
             NodeKind::Image { .. } => "img".into(),
             NodeKind::Citation { .. } => "cite".into(),
             NodeKind::CrossRef { .. } => "ref".into(),
+            NodeKind::FootnoteRef { .. } => "fnref".into(),
+            NodeKind::FootnoteDef { .. } => "fn".into(),
             NodeKind::SoftBreak | NodeKind::HardBreak => "br".into(),
             NodeKind::FileScope { .. } => "file".into(),
             NodeKind::Space { .. } => "sp".into(),
@@ -906,6 +917,14 @@ impl Node {
 
     pub fn citation(key: impl Into<String>) -> Self {
         Self::new(NodeKind::Citation { key: key.into() })
+    }
+
+    pub fn footnote_ref(label: impl Into<String>) -> Self {
+        Self::new(NodeKind::FootnoteRef { label: label.into() })
+    }
+
+    pub fn footnote_def(label: impl Into<String>, children: Vec<Node>) -> Self {
+        Self::new(NodeKind::FootnoteDef { label: label.into() }).with_children(children)
     }
 
     pub fn cross_ref(target: impl Into<String>) -> Self {

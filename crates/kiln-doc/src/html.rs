@@ -85,7 +85,71 @@ fn close_tag(name: &str, out: &mut String) {
 pub fn render_html(doc: &Document) -> String {
     let mut out = String::new();
     render_node(&doc.content, &mut out);
+    render_footnotes(&doc.content, &mut out);
     out
+}
+
+/// The numbered footnotes after the content, in order, each linking back to
+/// its first reference. Notes without a number were never referenced.
+fn render_footnotes(root: &Node, out: &mut String) {
+    let mut notes = Vec::new();
+    collect_footnotes(root, &mut notes);
+    if notes.is_empty() {
+        return;
+    }
+    notes.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+    out.push_str("<section class=\"footnotes\" role=\"doc-endnotes\"><ol>");
+    for (_, note) in &notes {
+        let label = footnote_label(note);
+        Tag::new("li").attr("id", &format!("fn-{label}")).open(out);
+        render_children(note, out);
+        out.push(' ');
+        Tag::new("a")
+            .attr("href", &format!("#fnref-{label}"))
+            .class("footnote-back")
+            .attr("role", "doc-backlink")
+            .attr("aria-label", "Back to text")
+            .open(out);
+        // U+21A9 with U+FE0E, so that it shows as text rather than an emoji.
+        out.push_str("&#8617;&#xFE0E;");
+        close_tag("a", out);
+        close_tag("li", out);
+    }
+    out.push_str("</ol></section>");
+}
+
+fn collect_footnotes<'a>(node: &'a Node, notes: &mut Vec<(f64, &'a Node)>) {
+    for child in &node.children {
+        match (&child.kind, child.attrs.properties.get("number")) {
+            (NodeKind::FootnoteDef { .. }, Some(Value::Number(n))) => notes.push((*n, child)),
+            _ => collect_footnotes(child, notes),
+        }
+    }
+}
+
+fn footnote_label(node: &Node) -> &str {
+    match &node.kind {
+        NodeKind::FootnoteDef { label } | NodeKind::FootnoteRef { label } => label,
+        _ => "",
+    }
+}
+
+/// A numbered link to its footnote, or the source text if the note does not
+/// exist.
+fn render_footnote_ref(label: &str, attrs: &Attrs, out: &mut String) {
+    let number = attrs.properties.get("number");
+    let id = attrs.properties.get("ref_id");
+    let (Some(Value::Number(number)), Some(Value::Text(id))) = (number, id) else {
+        out.push_str(&escape_html(&format!("[^{label}]")));
+        return;
+    };
+    Tag::new("sup").class("footnote-ref").open(out);
+    Tag::new("a")
+        .attr("href", &format!("#fn-{label}"))
+        .attr("id", id)
+        .attr("role", "doc-noteref")
+        .wrap_text(&number.to_string(), out);
+    close_tag("sup", out);
 }
 
 fn wrap_tag_name(kind: &NodeKind) -> Option<&'static str> {
@@ -204,6 +268,9 @@ fn render_node(node: &Node, out: &mut String) {
                 .unwrap_or(target);
             Tag::new("a").attr("href", href).wrap_text(text, out);
         }
+        NodeKind::FootnoteRef { label } => render_footnote_ref(label, &node.attrs, out),
+        // Notes render after the content, from render_html.
+        NodeKind::FootnoteDef { .. } => {}
         NodeKind::SoftBreak => out.push('\n'),
         NodeKind::HardBreak => out.push_str("<br>"),
         NodeKind::FileScope { .. } | NodeKind::Custom { .. } => {
@@ -788,6 +855,54 @@ mod tests {
     fn uncompiled_math_text_is_untouched() {
         let html = render_with_compiler("Given ($Z$), the output.");
         assert!(html.contains("Given (<span class=\"math\">Z</span>), the output."));
+    }
+
+    // -- footnotes --
+
+    #[test]
+    fn footnote_reference_and_note() {
+        let html = render_with_compiler("A claim.[^src] More.\n\n[^src]: See *the book*.");
+        assert!(html.contains(
+            "A claim.<sup class=\"footnote-ref\"><a href=\"#fn-src\" id=\"fnref-src\" \
+             role=\"doc-noteref\">1</a></sup> More."
+        ));
+        assert!(html.ends_with(
+            "<section class=\"footnotes\" role=\"doc-endnotes\"><ol><li id=\"fn-src\">See \
+             <em>the book</em>. <a href=\"#fnref-src\" class=\"footnote-back\" \
+             role=\"doc-backlink\" aria-label=\"Back to text\">&#8617;&#xFE0E;</a></li></ol></section>"
+        ));
+    }
+
+    #[test]
+    fn footnotes_number_in_order_of_first_reference() {
+        let md = "First[^b], then[^a], again[^b].\n\n[^a]: Note a.\n[^b]: Note b.";
+        let html = render_with_compiler(md);
+        assert!(html.contains("id=\"fnref-b\" role=\"doc-noteref\">1</a>"));
+        assert!(html.contains("id=\"fnref-a\" role=\"doc-noteref\">2</a>"));
+        assert!(html.contains("id=\"fnref-b-2\" role=\"doc-noteref\">1</a>"));
+        let notes = &html[html.find("class=\"footnotes\"").unwrap()..];
+        assert!(notes.find("fn-b").unwrap() < notes.find("fn-a").unwrap());
+    }
+
+    #[test]
+    fn footnote_without_a_note_stays_as_written() {
+        let html = render_with_compiler("A claim.[^missing]");
+        assert!(html.contains("A claim.[^missing]"));
+        assert!(!html.contains("footnotes"));
+    }
+
+    #[test]
+    fn footnote_never_referenced_is_left_out() {
+        let html = render_with_compiler("No references here.\n\n[^unused]: Never shown.");
+        assert!(!html.contains("Never shown"));
+    }
+
+    #[test]
+    fn footnote_definition_ends_a_paragraph_and_runs_on() {
+        let html = render_with_compiler("Text[^n]\n[^n]: First line\ncontinues here.\n\nAfter.");
+        assert!(html.contains("<p>Text<sup"));
+        assert!(html.contains("First line\ncontinues here."));
+        assert!(html.contains("<p>After.</p>"));
     }
 
     #[test]

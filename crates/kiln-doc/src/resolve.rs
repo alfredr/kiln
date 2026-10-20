@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
@@ -33,12 +33,14 @@ pub fn resolve(_ctx: &mut ResolveContext) {
 
 /// Resolve inits within a single document (convenience function).
 ///
-/// Runs `HoistDirectives` → `CascadeInits` → `ExecuteProgram` → `ResolveCrossRefs`.
+/// Runs `HoistDirectives` → `CascadeInits` → `ExecuteProgram` → `ResolveCrossRefs`
+/// → `NumberFootnotes`.
 pub fn resolve_document(doc: &mut Document) {
     HoistDirectives.run(doc);
     CascadeInits.run(doc);
     ExecuteProgram.run(doc);
     ResolveCrossRefs.run(doc);
+    NumberFootnotes.run(doc);
 }
 
 /// Resolve a document step-by-step, returning the AST snapshot after each pass.
@@ -1271,6 +1273,68 @@ fn format_label_display(template: &str, number: &str) -> String {
 }
 
 // ── CompileBlocks pass ──
+
+/// Number footnotes in the order they are first referenced. Each referenced
+/// note and each of its references gets the note's `number`; each reference
+/// also gets a unique `ref_id`, and the first one is what the note links back
+/// to. A reference to a note that does not exist stays unnumbered.
+pub struct NumberFootnotes;
+
+impl Pass for NumberFootnotes {
+    fn run(&mut self, doc: &mut Document) {
+        let mut defined = HashSet::new();
+        collect_footnote_labels(&doc.content, &mut defined);
+        let mut numbers = HashMap::new();
+        number_footnote_refs(&mut doc.content, &defined, &mut numbers);
+        number_footnote_defs(&mut doc.content, &numbers);
+    }
+}
+
+fn collect_footnote_labels(node: &Node, labels: &mut HashSet<String>) {
+    if let NodeKind::FootnoteDef { label } = &node.kind {
+        labels.insert(label.clone());
+    }
+    for child in &node.children {
+        collect_footnote_labels(child, labels);
+    }
+}
+
+/// Number references in document order. `numbers` maps a label to its number
+/// and how many references to it have been seen.
+fn number_footnote_refs(
+    node: &mut Node,
+    defined: &HashSet<String>,
+    numbers: &mut HashMap<String, (usize, usize)>,
+) {
+    if let NodeKind::FootnoteRef { label } = &node.kind
+        && defined.contains(label)
+    {
+        let next = numbers.len() + 1;
+        let (number, seen) = numbers.entry(label.clone()).or_insert((next, 0));
+        *seen += 1;
+        let id = match *seen {
+            1 => format!("fnref-{label}"),
+            n => format!("fnref-{label}-{n}"),
+        };
+        let properties = &mut node.attrs.properties;
+        properties.insert("number".into(), Value::Number(*number as f64));
+        properties.insert("ref_id".into(), Value::Text(id));
+    }
+    for child in &mut node.children {
+        number_footnote_refs(child, defined, numbers);
+    }
+}
+
+fn number_footnote_defs(node: &mut Node, numbers: &HashMap<String, (usize, usize)>) {
+    if let NodeKind::FootnoteDef { label } = &node.kind
+        && let Some((number, _)) = numbers.get(label)
+    {
+        node.attrs.properties.insert("number".into(), Value::Number(*number as f64));
+    }
+    for child in &mut node.children {
+        number_footnote_defs(child, numbers);
+    }
+}
 
 /// Compile raw blocks, preview code blocks and formatted leaves, storing
 /// results in `attrs.properties`.

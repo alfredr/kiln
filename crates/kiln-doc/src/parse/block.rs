@@ -26,6 +26,11 @@ pub(super) enum RawBlock {
     },
     /// A standalone directive line like `{@var(...)}`
     Directive(String),
+    /// A footnote's text: `[^label]: text`, running on until a blank line.
+    FootnoteDef {
+        label: String,
+        text: String,
+    },
 }
 
 pub(super) fn parse_blocks(lines: &[&str]) -> Vec<RawBlock> {
@@ -88,6 +93,13 @@ pub(super) fn parse_blocks(lines: &[&str]) -> Vec<RawBlock> {
         if trimmed.starts_with("{@") && trimmed.ends_with('}') {
             blocks.push(RawBlock::Directive(trimmed.to_string()));
             i += 1;
+            continue;
+        }
+
+        // Footnote definition: [^label]: text
+        if let Some((def, consumed)) = try_parse_footnote_def(&lines[i..]) {
+            blocks.push(def);
+            i += consumed;
             continue;
         }
 
@@ -441,6 +453,33 @@ fn is_table_header_start(line: &str, next_line: Option<&str>) -> bool {
             .all(|b| b == b'|' || b == b'-' || b == b':' || b == b' ')
 }
 
+/// The label and first line of text of a footnote definition, `[^label]: text`.
+fn footnote_def_start(line: &str) -> Option<(&str, &str)> {
+    let (label, text) = line.strip_prefix("[^")?.split_once("]:")?;
+    if label.is_empty() || label.contains(char::is_whitespace) {
+        return None;
+    }
+    Some((label, text.trim()))
+}
+
+/// A footnote definition: its first line, and the lines after it up to a blank
+/// line or the next definition.
+fn try_parse_footnote_def(lines: &[&str]) -> Option<(RawBlock, usize)> {
+    let (label, first) = footnote_def_start(lines[0])?;
+    let rest = lines[1..]
+        .iter()
+        .take_while(|line| !line.trim().is_empty() && footnote_def_start(line).is_none());
+    let mut text = first.to_string();
+    let mut consumed = 1;
+    for line in rest {
+        text.push('\n');
+        text.push_str(line.trim());
+        consumed += 1;
+    }
+    let label = label.to_string();
+    Some((RawBlock::FootnoteDef { label, text }, consumed))
+}
+
 fn parse_paragraph(lines: &[&str]) -> (RawBlock, usize) {
     let mut text = String::new();
     let mut i = 0;
@@ -473,6 +512,9 @@ fn parse_paragraph(lines: &[&str]) -> (RawBlock, usize) {
         }
         // If this line looks like a table header, stop the paragraph
         if i > 0 && is_table_header_start(line, lines.get(i + 1).copied()) {
+            break;
+        }
+        if i > 0 && footnote_def_start(line).is_some() {
             break;
         }
         if !text.is_empty() {

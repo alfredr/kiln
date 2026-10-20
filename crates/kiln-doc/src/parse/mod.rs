@@ -233,6 +233,9 @@ fn parse_inlines_in_blocks(blocks: Vec<RawBlock>) -> Vec<Node> {
                 let inner = &text[1..text.len() - 1]; // strip { }
                 parse_directive_to_node(inner)
             }
+            RawBlock::FootnoteDef { label, text } => {
+                Some(Node::footnote_def(label, parse_inline(&text)))
+            }
         })
         .collect()
 }

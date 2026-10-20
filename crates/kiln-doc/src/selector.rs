@@ -142,6 +142,16 @@ const KIND_REGISTRY: &[KindEntry] = &[
         kebab: "cross-ref",
         alias: "ref",
     },
+    KindEntry {
+        pascal: "FootnoteRef",
+        kebab: "footnote-ref",
+        alias: "fnref",
+    },
+    KindEntry {
+        pascal: "FootnoteDef",
+        kebab: "footnote",
+        alias: "fn",
+    },
 ];
 
 /// Resolve any form of kind name (PascalCase, kebab-case, or alias) to canonical PascalCase.
@@ -180,6 +190,8 @@ pub fn node_kind_name(kind: &NodeKind) -> &'static str {
         NodeKind::Image { .. } => "Image",
         NodeKind::Citation { .. } => "Citation",
         NodeKind::CrossRef { .. } => "CrossRef",
+        NodeKind::FootnoteRef { .. } => "FootnoteRef",
+        NodeKind::FootnoteDef { .. } => "FootnoteDef",
         NodeKind::SoftBreak => "SoftBreak",
         NodeKind::HardBreak => "HardBreak",
         NodeKind::Space { .. } => "Space",

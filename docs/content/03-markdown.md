@@ -298,6 +298,27 @@ With this configuration, math is written in Typst's syntax: `$sqrt(x^2 + 1)$` ra
 
 Math is not special in this: any inline code (`code-inline`) given a `format` compiles the same way.
 
+## Footnotes {#sec:footnotes}
+
+Mark a footnote with `[^label]` and write its text anywhere in the document, on a line of its own starting with `[^label]:`. The text runs on until a blank line:
+
+```markdown
+The bound is a standard one.[^pinsker]
+
+[^pinsker]: See any information theory textbook,
+for example Cover and Thomas.
+```
+
+Footnotes are numbered in the order they are first referenced. Each reference becomes a superscript number linking to its note, and the notes follow the content as a numbered list, each linking back to the text:
+
+```html
+<sup class="footnote-ref"><a href="#fn-pinsker" id="fnref-pinsker" role="doc-noteref">1</a></sup>
+...
+<section class="footnotes" role="doc-endnotes"><ol><li id="fn-pinsker">See any ... <a href="#fnref-pinsker" class="footnote-back" role="doc-backlink" aria-label="Back to text">↩</a></li></ol></section>
+```
+
+A reference to a note that does not exist is left as written, and a note that is never referenced is left out. How the notes look, at the end or in the margin, is up to the site's CSS and scripts.
+
 ## Escaping Special Characters {#sec:escaping}
 
 Prefix any special character with a backslash to render it literally:

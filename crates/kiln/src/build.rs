@@ -438,6 +438,7 @@ fn compile_tree(
         let mut cascade = kiln_doc::resolve::CascadeInits;
         let mut execute = kiln_doc::resolve::ExecuteProgram;
         let mut cross_refs = kiln_doc::resolve::ResolveCrossRefs;
+        let mut footnotes = kiln_doc::resolve::NumberFootnotes;
         let mut citations =
             prelude.bibliography.as_ref().map(|bibliography| ResolveCitations { bibliography });
         let mut compile = kiln_doc::resolve::CompileBlocks::new(compiler);
@@ -447,6 +448,7 @@ fn compile_tree(
             &mut cascade,
             &mut execute,
             &mut cross_refs,
+            &mut footnotes,
         ];
         if let Some(citations) = citations.as_mut() {
             passes.push(citations);

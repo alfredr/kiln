@@ -146,10 +146,27 @@ fn try_scan_bracket(chars: &[char], pos: usize) -> Option<(Vec<Node>, usize)> {
         let nodes = keys.into_iter().map(Node::citation).collect();
         return Some((nodes, end));
     }
+    // Footnote reference: [^label]
+    if let Some((label, end)) = scan_footnote_ref(chars, pos) {
+        return Some((vec![Node::footnote_ref(label)], end));
+    }
     // Link: [text](url)
     let (link_text, url, end) = scan_image_or_link(chars, pos)?;
     let children = parse_inline(&link_text);
     Some((vec![Node::link(url, children)], end))
+}
+
+/// Scan a footnote reference, `[^label]`, with no whitespace in the label.
+fn scan_footnote_ref(chars: &[char], pos: usize) -> Option<(String, usize)> {
+    if chars.get(pos + 1) != Some(&'^') {
+        return None;
+    }
+    let len = chars[pos + 2..].iter().position(|&c| c == ']' || c.is_whitespace())?;
+    if len == 0 || chars[pos + 2 + len] != ']' {
+        return None;
+    }
+    let label = chars[pos + 2..pos + 2 + len].iter().collect();
+    Some((label, pos + 3 + len))
 }
 
 fn try_scan_cross_ref_inline(chars: &[char], pos: usize) -> Option<(Node, usize)> {
