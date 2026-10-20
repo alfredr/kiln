@@ -13,7 +13,7 @@ use kiln_doc::ast::{
 use crate::bibliography::{Bibliography, ResolveCitations};
 use crate::config::{Config, TypstConfig};
 use crate::content::{ContentKind, ContentNode, ContentTree, discover_content};
-use crate::template::{load_templates, render_index, render_page, render_post};
+use crate::template::{Rendered, load_templates, render_index, render_page, render_post};
 use crate::world::KilnWorld;
 
 const BUILTIN_PRELUDE: &str = include_str!("prelude.kiln");
@@ -463,7 +463,7 @@ fn compile_tree(
             &dest,
             &child_dirs,
             &mut passes,
-            |body, bibliography| render_fn(tera, config, item, body, bibliography, tree),
+            |rendered| render_fn(tera, config, item, rendered, tree),
         )?;
     }
 
@@ -547,7 +547,7 @@ fn compile_content(
     dest_dir: &Path,
     skip_dirs: &[&str],
     passes: &mut [&mut dyn kiln_doc::visit::Pass],
-    render_fn: impl FnOnce(&str, &str) -> anyhow::Result<String>,
+    render_fn: impl FnOnce(&Rendered) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     let markdown = std::fs::read_to_string(md_path)
         .with_context(|| format!("failed to read {}", md_path.display()))?;
@@ -559,12 +559,13 @@ fn compile_content(
         pass.run(&mut doc);
     }
 
-    let body_html = kiln_doc::html::render_html(&doc);
+    let body = kiln_doc::html::render_html(&doc);
+    let footnotes = kiln_doc::html::render_footnotes(&doc);
     let bibliography = match doc.content.attrs.properties.get("bibliography") {
         Some(Value::Text(html)) => html.as_str(),
         _ => "",
     };
-    let full_html = render_fn(&body_html, bibliography)?;
+    let full_html = render_fn(&Rendered { body: &body, footnotes: &footnotes, bibliography })?;
 
     std::fs::create_dir_all(dest_dir)?;
     std::fs::write(dest_dir.join("index.html"), &full_html)?;

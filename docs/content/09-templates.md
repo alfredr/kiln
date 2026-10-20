@@ -49,6 +49,8 @@ In addition to site and navigation variables, `post.html` receives:
 - `path` — the full URL path for the post (e.g., `"guides/my-post"`)
 - `slug` — the local slug for the post (e.g., `"my-post"`)
 - `body` — the rendered HTML content of the post
+- `footnotes`: the post's footnotes as a numbered list, empty without footnotes (see [Footnotes](/markdown/))
+- `bibliography`: the works the post cites as a list, empty without a bibliography (see [Bibliography](/cross-references/))
 
 ### `page.html` Variables
 
@@ -58,6 +60,7 @@ In addition to site and navigation variables, `page.html` receives:
 - `path` — the full URL path for the page
 - `slug` — the local slug for the page
 - `body` — the rendered HTML content of the page
+- `footnotes` and `bibliography`: as for posts
 
 ### `index.html` Variables
 

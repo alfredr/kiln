@@ -309,15 +309,24 @@ The bound is a standard one.[^pinsker]
 for example Cover and Thomas.
 ```
 
-Footnotes are numbered in the order they are first referenced. Each reference becomes a superscript number linking to its note, and the notes follow the content as a numbered list, each linking back to the text:
+Footnotes are numbered in the order they are first referenced. Each reference becomes a superscript number linking to its note:
 
 ```html
 <sup class="footnote-ref"><a href="#fn-pinsker" id="fnref-pinsker" role="doc-noteref">1</a></sup>
-...
-<section class="footnotes" role="doc-endnotes"><ol><li id="fn-pinsker">See any ... <a href="#fnref-pinsker" class="footnote-back" role="doc-backlink" aria-label="Back to text">↩</a></li></ol></section>
 ```
 
-A reference to a note that does not exist is left as written, and a note that is never referenced is left out. How the notes look, at the end or in the margin, is up to the site's CSS and scripts.
+Templates get the notes as a `footnotes` variable, a numbered list in which each note links back to the text. It is empty on a page without footnotes, so a template can give the list a heading of its own:
+
+```html
+{% if footnotes %}
+<section role="doc-endnotes">
+  <h2>Notes</h2>
+  {{ footnotes | safe }}
+</section>
+{% endif %}
+```
+
+A reference to a note that does not exist is left as written, and a note that is never referenced is left out. How the notes look, at the end or in the margin, is up to the site's templates, CSS and scripts.
 
 ## Escaping Special Characters {#sec:escaping}
 

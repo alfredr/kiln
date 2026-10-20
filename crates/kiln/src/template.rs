@@ -440,22 +440,30 @@ fn insert_nav(ctx: &mut tera::Context, tree: &ContentTree) {
 
 // ── Render functions ──
 
+/// A page's content as HTML, in the parts that templates place.
+pub struct Rendered<'a> {
+    pub body: &'a str,
+    /// The page's footnotes, as a list; empty without footnotes.
+    pub footnotes: &'a str,
+    /// The works the page cites, as a list; empty without a bibliography.
+    pub bibliography: &'a str,
+}
+
 fn render_content(
     tera: &Tera,
     config: &Config,
     tree: &ContentTree,
     template: &str,
-    body_html: &str,
-    bibliography_html: &str,
+    rendered: &Rendered,
     populate: impl FnOnce(&mut tera::Context),
 ) -> anyhow::Result<String> {
     let mut ctx = tera::Context::new();
     insert_site(&mut ctx, config);
     insert_nav(&mut ctx, tree);
     populate(&mut ctx);
-    ctx.insert("body", body_html);
-    // The works the page cites, as a list; empty without a bibliography.
-    ctx.insert("bibliography", bibliography_html);
+    ctx.insert("body", rendered.body);
+    ctx.insert("footnotes", rendered.footnotes);
+    ctx.insert("bibliography", rendered.bibliography);
     tera.render(template, &ctx)
         .with_context(|| format!("failed to render {template}"))
 }
@@ -464,12 +472,11 @@ pub fn render_post(
     tera: &Tera,
     config: &Config,
     post: &ContentItem,
-    body_html: &str,
-    bibliography_html: &str,
+    rendered: &Rendered,
     tree: &ContentTree,
 ) -> anyhow::Result<String> {
     let template = template_for(&post.meta, "post.html");
-    render_content(tera, config, tree, template, body_html, bibliography_html, |ctx| {
+    render_content(tera, config, tree, template, rendered, |ctx| {
         ctx.insert("title", &post.meta.title.as_deref().unwrap_or(&post.slug));
         ctx.insert("path", &post.path);
         ctx.insert("slug", &post.slug);
@@ -484,12 +491,11 @@ pub fn render_page(
     tera: &Tera,
     config: &Config,
     page: &ContentItem,
-    body_html: &str,
-    bibliography_html: &str,
+    rendered: &Rendered,
     tree: &ContentTree,
 ) -> anyhow::Result<String> {
     let template = template_for(&page.meta, "page.html");
-    render_content(tera, config, tree, template, body_html, bibliography_html, |ctx| {
+    render_content(tera, config, tree, template, rendered, |ctx| {
         ctx.insert("title", &page.meta.title.as_deref().unwrap_or(&page.slug));
         ctx.insert("path", &page.path);
         ctx.insert("slug", &page.slug);
